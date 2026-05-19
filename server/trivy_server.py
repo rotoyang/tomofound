@@ -261,6 +261,39 @@ if Server is not None:
                     "required": ["package", "ecosystem"],
                 },
             ),
+            types.Tool(
+                name="discover_targets",
+                description="Discover all scannable AI tool extension files on the host filesystem (outside sandbox).",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "enum": ["claude", "gemini", "openai"],
+                            "description": "Limit scan to one AI tool directory",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Scan a specific absolute path instead of installed tools",
+                        },
+                    },
+                },
+            ),
+            types.Tool(
+                name="read_file",
+                description="Read a file from the host filesystem (up to 1 MB). Returns content as text.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path to the file"},
+                        "root": {
+                            "type": "string",
+                            "description": "Custom scan root — required for paths outside ~/.claude, ~/.gemini, ~/.openai",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
         ]
 
     @_server.call_tool()
@@ -306,6 +339,20 @@ if Server is not None:
 
         if name == "check_osv":
             result = query_osv(arguments["package"], arguments["ecosystem"])
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "discover_targets":
+            result = discover_targets(
+                target=arguments.get("target"),
+                path=arguments.get("path"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "read_file":
+            result = read_file(
+                path=arguments["path"],
+                root=arguments.get("root"),
+            )
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")
