@@ -26,12 +26,14 @@ def find_or_install_trivy() -> str | None:
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             tmp_path = tmp.name
         urllib.request.urlretrieve(url, tmp_path)
-        import tarfile
-        with tarfile.open(tmp_path, "r:gz") as tf:
-            member = tf.getmember("trivy")
-            member.name = os.path.basename(member.name)
-            tf.extract(member, TOOLS_DIR)
-        os.unlink(tmp_path)
+        try:
+            import tarfile
+            with tarfile.open(tmp_path, "r:gz") as tf:
+                member = tf.getmember("trivy")
+                member.name = os.path.basename(member.name)
+                tf.extract(member, TOOLS_DIR)
+        finally:
+            os.unlink(tmp_path)
         os.chmod(TOOLS_TRIVY, 0o755)
         return TOOLS_TRIVY
     except Exception:
