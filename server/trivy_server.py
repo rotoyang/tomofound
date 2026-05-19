@@ -79,7 +79,7 @@ def query_osv(package: str, ecosystem: str) -> dict:
         result_vulns = []
         for vuln in vulns:
             result_vulns.append({
-                "id": vuln["id"],
+                "id": vuln.get("id", ""),
                 "severity": vuln.get("database_specific", {}).get("severity", "unknown"),
                 "summary": vuln.get("summary", "")
             })
