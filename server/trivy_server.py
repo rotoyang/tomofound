@@ -18,7 +18,6 @@ def detect_scan_level(path: str) -> tuple[int, str]:
     skip_dirs = {".git", "node_modules", "__pycache__"}
 
     for item in os.listdir(path):
-        item_path = os.path.join(path, item)
         if item in lock_files:
             return (1, f"lock file ({item})")
 
