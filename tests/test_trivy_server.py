@@ -3,7 +3,10 @@ from unittest.mock import patch, MagicMock
 import tempfile, shutil
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from server.trivy_server import find_or_install_trivy, detect_scan_level, query_osv, discover_targets, read_file
+from server.trivy_server import (
+    find_or_install_trivy, detect_scan_level, query_osv, discover_targets, read_file,
+    _tag_file, _plugin_from_path, _source_type, _STANDARD_ROOTS, _READ_ALLOWED_PREFIXES,
+)
 
 
 # --- detect_scan_level ---
@@ -207,3 +210,77 @@ def test_read_file_returns_error_for_missing_file(tmp_path):
     result = read_file(str(tmp_path / "nonexistent.txt"), root=str(tmp_path))
     assert "error" in result
     assert "not found" in result["error"]
+
+
+# --- platform path coverage ---
+
+def test_standard_roots_cover_claude_extension_dirs():
+    claude = _STANDARD_ROOTS["claude"]
+    assert any(r.endswith("/.claude/plugins/cache") for r in claude)
+    assert any(r.endswith("/.claude/plugins/repos") for r in claude)
+    assert any(r.endswith("/.claude/skills") for r in claude)
+    assert any(r.endswith("/.claude/agents") for r in claude)
+    assert any(r.endswith("/.claude/commands") for r in claude)
+    assert any(r.endswith("/.claude/.mcp.json") for r in claude)
+
+
+def test_standard_roots_cover_gemini_extension_dirs():
+    gemini = _STANDARD_ROOTS["gemini"]
+    assert any(r.endswith("/.gemini/extensions") for r in gemini)
+    assert any(r.endswith("/.gemini/commands") for r in gemini)
+    assert any(r.endswith("/.gemini/settings.json") for r in gemini)
+
+
+def test_standard_roots_openai_points_at_codex():
+    openai = _STANDARD_ROOTS["openai"]
+    assert all("/.codex/" in r or r.endswith("/.codex/AGENTS.md") for r in openai)
+    assert not any("/.openai/" in r for r in openai)
+    assert any(r.endswith("/.codex/auth.json") for r in openai)
+    assert any(r.endswith("/.codex/config.toml") for r in openai)
+    assert any(r.endswith("/.codex/prompts") for r in openai)
+
+
+def test_read_allowed_prefixes_match_standard_roots():
+    assert any(p.endswith("/.codex/") for p in _READ_ALLOWED_PREFIXES)
+    assert not any(p.endswith("/.openai/") for p in _READ_ALLOWED_PREFIXES)
+
+
+def test_tag_file_treats_agents_md_as_skill(tmp_path):
+    f = tmp_path / "AGENTS.md"
+    f.write_text("")
+    assert _tag_file(str(f)) == "SKILL"
+
+
+def test_tag_file_treats_claude_agents_dir_as_skill():
+    p = os.path.expanduser("~/.claude/agents/my-agent.md")
+    assert _tag_file(p) == "SKILL"
+
+
+def test_tag_file_treats_codex_prompts_as_skill():
+    p = os.path.expanduser("~/.codex/prompts/p.md")
+    assert _tag_file(p) == "SKILL"
+
+
+def test_tag_file_treats_gemini_commands_toml_as_skill():
+    p = os.path.expanduser("~/.gemini/commands/foo.toml")
+    assert _tag_file(p) == "SKILL"
+
+
+def test_tag_file_codex_config_toml_is_config():
+    p = os.path.expanduser("~/.codex/config.toml")
+    assert _tag_file(p) == "CONFIG"
+
+
+def test_source_type_gemini_extension_is_plugin():
+    p = os.path.expanduser("~/.gemini/extensions/foo/server.ts")
+    assert _source_type(p, "CODE") == "plugin"
+
+
+def test_plugin_from_path_gemini_extension():
+    p = os.path.expanduser("~/.gemini/extensions/foo/server.ts")
+    assert _plugin_from_path(p) == "foo"
+
+
+def test_plugin_from_path_claude_agents_returns_stem():
+    p = os.path.expanduser("~/.claude/agents/reviewer.md")
+    assert _plugin_from_path(p) == "reviewer"

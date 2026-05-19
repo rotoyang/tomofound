@@ -15,9 +15,9 @@ the checklist below exactly. Do not skip steps.
 
 `ARGUMENTS` may contain:
 - Nothing → scan all installed AI tool extensions (default)
-- `--target claude` → scan only `~/.claude/`
-- `--target gemini` → scan only `~/.gemini/`
-- `--target openai` → scan only `~/.openai/`
+- `--target claude` → scan only `~/.claude/` (plugins, skills, agents, commands, MCP, settings)
+- `--target gemini` → scan only `~/.gemini/` (extensions, commands, settings, credentials)
+- `--target openai` → scan only `~/.codex/` (auth, config, AGENTS.md, prompts)
 - A local path (file or directory) → pre-installation scan of that path
 - A GitHub URL (`https://github.com/...`) → clone and scan before installing
 

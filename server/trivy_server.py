@@ -28,45 +28,59 @@ FILE_READ_LIMIT = 1024 * 1024  # 1 MB
 
 _LOCKFILE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "go.sum", "Cargo.lock"}
 _MANIFEST_NAMES = {"package.json", "requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml"}
-_CONFIG_NAMES = {"settings.json", "config.json", "oauth_creds.json", "credentials.json"}
+_CONFIG_NAMES = {"settings.json", "config.json", "oauth_creds.json", "credentials.json", "auth.json", "config.toml"}
 _CODE_EXTS = {".ts", ".js", ".mjs", ".cjs", ".py", ".go", ".rs", ".sh", ".bash", ".zsh"}
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build", "out", ".venv", "venv"}
+_SKILL_DIR_MARKERS = tuple(os.sep + d + os.sep for d in ("skills", "agents", "commands", "prompts"))
 
 _STANDARD_ROOTS = {
     "claude": [
         os.path.expanduser("~/.claude/plugins/cache"),
+        os.path.expanduser("~/.claude/plugins/repos"),
         os.path.expanduser("~/.claude/skills"),
+        os.path.expanduser("~/.claude/agents"),
+        os.path.expanduser("~/.claude/commands"),
         os.path.expanduser("~/.claude/.mcp.json"),
         os.path.expanduser("~/.claude/settings.json"),
         os.path.expanduser("~/.claude/config.json"),
     ],
     "gemini": [
+        os.path.expanduser("~/.gemini/extensions"),
+        os.path.expanduser("~/.gemini/commands"),
         os.path.expanduser("~/.gemini/settings.json"),
         os.path.expanduser("~/.gemini/oauth_creds.json"),
+        os.path.expanduser("~/.gemini/.env"),
     ],
     "openai": [
-        os.path.expanduser("~/.openai/credentials.json"),
+        os.path.expanduser("~/.codex/auth.json"),
+        os.path.expanduser("~/.codex/config.toml"),
+        os.path.expanduser("~/.codex/AGENTS.md"),
+        os.path.expanduser("~/.codex/prompts"),
     ],
 }
 
 _READ_ALLOWED_PREFIXES = [
     os.path.expanduser("~/.claude/"),
     os.path.expanduser("~/.gemini/"),
-    os.path.expanduser("~/.openai/"),
+    os.path.expanduser("~/.codex/"),
 ]
 
 
 def _tag_file(path: str) -> str | None:
     name = os.path.basename(path)
     ext = os.path.splitext(name)[1].lower()
-    skills_marker = os.sep + "skills" + os.sep
+    in_skill_dir = any(m in path for m in _SKILL_DIR_MARKERS) or path.startswith(os.path.expanduser("~/.claude/skills/"))
     if name in _LOCKFILE_NAMES:
         return "LOCKFILE"
     if name in _MANIFEST_NAMES:
         return "MANIFEST"
     if name == ".mcp.json":
         return "MCP"
-    if name.endswith(".md") and (skills_marker in path or path.startswith(os.path.expanduser("~/.claude/skills/"))):
+    if name == "AGENTS.md":
+        return "SKILL"
+    if name.endswith(".md") and in_skill_dir:
+        return "SKILL"
+    if ext == ".toml" and (os.sep + "commands" + os.sep) in path:
         return "SKILL"
     if name in _CONFIG_NAMES or name.endswith(".env"):
         return "CONFIG"
@@ -76,25 +90,44 @@ def _tag_file(path: str) -> str | None:
 
 
 def _plugin_from_path(path: str) -> str | None:
-    cache = os.path.expanduser("~/.claude/plugins/cache")
-    skills_dir = os.path.expanduser("~/.claude/skills")
-    if path.startswith(cache + os.sep):
-        parts = path[len(cache) + 1:].split(os.sep)
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"  # publisher/plugin-name
-        if len(parts) == 1:
-            return parts[0]
-    if path.startswith(skills_dir + os.sep):
-        return os.path.splitext(os.path.basename(path))[0]
+    nested_roots = (
+        os.path.expanduser("~/.claude/plugins/cache"),
+        os.path.expanduser("~/.claude/plugins/repos"),
+    )
+    for base in nested_roots:
+        if path.startswith(base + os.sep):
+            parts = path[len(base) + 1:].split(os.sep)
+            if len(parts) >= 2:
+                return f"{parts[0]}/{parts[1]}"  # publisher/plugin-name
+            if len(parts) == 1:
+                return parts[0]
+
+    gemini_ext = os.path.expanduser("~/.gemini/extensions")
+    if path.startswith(gemini_ext + os.sep):
+        return path[len(gemini_ext) + 1:].split(os.sep)[0]
+
+    leaf_roots = (
+        os.path.expanduser("~/.claude/skills"),
+        os.path.expanduser("~/.claude/agents"),
+        os.path.expanduser("~/.claude/commands"),
+        os.path.expanduser("~/.gemini/commands"),
+        os.path.expanduser("~/.codex/prompts"),
+    )
+    for base in leaf_roots:
+        if path.startswith(base + os.sep):
+            return os.path.splitext(os.path.basename(path))[0]
     return None
 
 
 def _source_type(path: str, tag: str) -> str:
-    cache = os.path.expanduser("~/.claude/plugins/cache")
-    skills_dir = os.path.expanduser("~/.claude/skills")
-    if path.startswith(cache + os.sep):
+    plugin_roots = (
+        os.path.expanduser("~/.claude/plugins/cache"),
+        os.path.expanduser("~/.claude/plugins/repos"),
+        os.path.expanduser("~/.gemini/extensions"),
+    )
+    if any(path.startswith(r + os.sep) for r in plugin_roots):
         return "plugin"
-    if path.startswith(skills_dir + os.sep):
+    if tag == "SKILL":
         return "skill"
     if tag == "MCP":
         return "mcp"
