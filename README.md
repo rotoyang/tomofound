@@ -48,8 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 # Scan only Gemini configuration
 /security-scan --target gemini
 
-# Pre-installation scan — local file or directory
-/security-scan ~/Downloads/suspicious-plugin.zip
+# Pre-installation scan — local directory
 /security-scan ~/Downloads/plugin-dir/
 
 # Pre-installation scan — GitHub repository

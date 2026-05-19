@@ -5,7 +5,9 @@ import tempfile, shutil
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from server.trivy_server import (
     find_or_install_trivy, detect_scan_level, query_osv, discover_targets, read_file,
+    write_file, clone_repo, cleanup_clone, _is_safe_root,
     _tag_file, _plugin_from_path, _source_type, _STANDARD_ROOTS, _READ_ALLOWED_PREFIXES,
+    _WRITE_ALLOWED_PREFIXES, CLONE_PREFIX, TOOLS_DIR,
 )
 
 
@@ -284,3 +286,158 @@ def test_plugin_from_path_gemini_extension():
 def test_plugin_from_path_claude_agents_returns_stem():
     p = os.path.expanduser("~/.claude/agents/reviewer.md")
     assert _plugin_from_path(p) == "reviewer"
+
+
+# --- _is_safe_root ---
+
+def test_is_safe_root_accepts_home_subdir(tmp_path):
+    assert _is_safe_root(str(tmp_path)) is True
+
+
+def test_is_safe_root_accepts_home_itself():
+    assert _is_safe_root(os.path.expanduser("~")) is True
+
+
+def test_is_safe_root_rejects_etc():
+    assert _is_safe_root("/etc") is False
+
+
+def test_is_safe_root_rejects_root_filesystem():
+    assert _is_safe_root("/") is False
+
+
+def test_is_safe_root_rejects_ssh():
+    assert _is_safe_root(os.path.expanduser("~/.ssh")) is False
+
+
+def test_is_safe_root_rejects_aws():
+    assert _is_safe_root(os.path.expanduser("~/.aws")) is False
+
+
+def test_is_safe_root_rejects_gnupg_subpath():
+    assert _is_safe_root(os.path.expanduser("~/.gnupg/private-keys-v1.d")) is False
+
+
+# --- read_file with sensitive root ---
+
+def test_read_file_rejects_sensitive_root_even_under_home():
+    result = read_file(os.path.expanduser("~/.ssh/id_rsa"),
+                       root=os.path.expanduser("~/.ssh"))
+    assert "error" in result
+    assert "not permitted" in result["error"]
+
+
+def test_read_file_root_does_not_accidentally_match_prefix(tmp_path):
+    # Regression: previously read_file used startswith without trailing sep,
+    # so root=/tmp/foo would also grant access to /tmp/foobar/secret.
+    sibling = tmp_path.parent / (tmp_path.name + "_sibling")
+    sibling.mkdir()
+    (sibling / "secret.txt").write_text("nope")
+    result = read_file(str(sibling / "secret.txt"), root=str(tmp_path))
+    assert "error" in result
+    assert "not permitted" in result["error"]
+
+
+# --- write_file ---
+
+def test_write_file_rejects_unpermitted_path(tmp_path):
+    result = write_file(str(tmp_path / "out.md"), "hi")
+    assert "error" in result
+    assert "not permitted" in result["error"]
+
+
+def test_write_file_writes_to_reports_dir(tmp_path, monkeypatch):
+    fake_reports = tmp_path / "tomofound"
+    monkeypatch.setattr(
+        "server.trivy_server._WRITE_ALLOWED_PREFIXES",
+        [str(fake_reports) + os.sep],
+    )
+    target = fake_reports / "reports" / "r.md"
+    result = write_file(str(target), "# report\n")
+    assert result.get("ok") is True
+    assert target.read_text() == "# report\n"
+
+
+def test_write_file_rejects_oversized_content(tmp_path, monkeypatch):
+    fake_reports = tmp_path / "tomofound"
+    monkeypatch.setattr(
+        "server.trivy_server._WRITE_ALLOWED_PREFIXES",
+        [str(fake_reports) + os.sep],
+    )
+    big = "x" * (8 * 1024 * 1024 + 1)
+    result = write_file(str(fake_reports / "r.md"), big)
+    assert "error" in result
+    assert "exceeds" in result["error"]
+
+
+# --- clone_repo ---
+
+def test_clone_repo_rejects_non_github_url():
+    result = clone_repo("https://evil.example.com/foo/bar")
+    assert "error" in result
+
+
+def test_clone_repo_rejects_shell_metacharacters():
+    result = clone_repo("https://github.com/foo/bar; rm -rf ~")
+    assert "error" in result
+
+
+def test_clone_repo_rejects_path_traversal():
+    result = clone_repo("https://github.com/../etc/passwd")
+    assert "error" in result
+
+
+def test_clone_repo_accepts_valid_url_format():
+    # Don't actually clone — just verify the URL passes validation
+    # by mocking subprocess.run to return success.
+    with patch("server.trivy_server.subprocess.run") as mock_run, \
+         patch("server.trivy_server.tempfile.mkdtemp", return_value="/tmp/fake-tomofound-scan-x"):
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        result = clone_repo("https://github.com/foo/bar")
+        assert "error" not in result
+        assert result["path"].endswith("target")
+        args = mock_run.call_args[0][0]
+        # Must use list args and `--` separator (no shell injection)
+        assert args[:4] == ["git", "clone", "--depth", "1"]
+        assert "--" in args
+
+
+# --- cleanup_clone ---
+
+def test_cleanup_clone_removes_tomofound_dir(tmp_path, monkeypatch):
+    fake_tools = tmp_path
+    target = fake_tools / f"{CLONE_PREFIX}abc"
+    target.mkdir()
+    (target / "marker").write_text("x")
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(fake_tools))
+    result = cleanup_clone(str(target))
+    assert result.get("ok") is True
+    assert not target.exists()
+
+
+def test_cleanup_clone_rejects_non_tomofound_dir(tmp_path, monkeypatch):
+    target = tmp_path / "random-dir"
+    target.mkdir()
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path))
+    result = cleanup_clone(str(target))
+    assert "error" in result
+    assert target.exists()
+
+
+def test_cleanup_clone_rejects_outside_tools_dir(tmp_path, monkeypatch):
+    elsewhere = tmp_path / f"{CLONE_PREFIX}escaped"
+    elsewhere.mkdir()
+    fake_tools = tmp_path / "tools"
+    fake_tools.mkdir()
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(fake_tools))
+    result = cleanup_clone(str(elsewhere))
+    assert "error" in result
+    assert elsewhere.exists()
+
+
+# --- discover_targets path validation ---
+
+def test_discover_targets_rejects_sensitive_path():
+    result = discover_targets(path="/etc")
+    assert result.get("error") == "path not permitted"
+    assert result["items"] == []

@@ -27,12 +27,15 @@ the checklist below exactly. Do not skip steps.
 
 ### Step 1 — Determine scan targets
 
-If ARGUMENTS contains a GitHub URL:
-```bash
-mkdir -p ~/.claude/tools/scan-tmp
-git clone --depth 1 "ARGUMENTS" ~/.claude/tools/scan-tmp/target 2>&1
+If ARGUMENTS contains a GitHub URL, call the MCP tool (do NOT use Bash `git clone` — the URL is untrusted input):
+
 ```
-Set scan root to `~/.claude/tools/scan-tmp/target`. Remember to delete it after the scan.
+Call MCP tool: clone_repo
+  url: "<ARGUMENTS>"
+```
+
+The tool returns `{ "path": "<scan root>", "cleanup_path": "<temp dir>" }` or `{ "error": ... }`.
+Use `path` as the scan root for subsequent steps. Remember `cleanup_path` — pass it to `cleanup_clone` after the scan.
 
 If ARGUMENTS contains a local path, use that path as scan root.
 
@@ -104,7 +107,7 @@ For each item, read the file content by calling the MCP tool:
 ```
 Call MCP tool: read_file
   path: "<item path from discover_targets>"
-  root: "<custom scan root>"  ← only needed for pre-install scans outside ~/.claude/~/.gemini/~/.openai
+  root: "<custom scan root>"  ← only needed for pre-install scans outside ~/.claude, ~/.gemini, ~/.codex. The MCP server requires it to be under HOME or system temp dir; ~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.docker are blocked.
 ```
 
 If `read_file` returns `{ "error": ... }`, skip the file and note "unreadable" in that item's report entry.
@@ -407,11 +410,15 @@ After all analyses are complete:
 
 Risk badges: `✅ CLEAN` · `🔵 LOW` · `⚠️ MEDIUM` · `🟠 HIGH` · `🔴 CRITICAL`
 
-4. Save the report:
-```bash
-mkdir -p ~/.claude/plugins/data/tomofound/reports
-# Save report to ~/.claude/plugins/data/tomofound/reports/YYYY-MM-DD-HH-MM.md
+4. Save the report via the MCP tool (sandbox cannot write to host paths directly):
+
 ```
+Call MCP tool: write_file
+  path: "~/.claude/plugins/data/tomofound/reports/YYYY-MM-DD-HH-MM.md"
+  content: "<full rendered report markdown>"
+```
+
+The tool creates parent directories automatically. If it returns `{ "error": ... }`, surface the error to the user.
 
 5. If any `read_file` calls returned `truncated: true`, append this section to the report:
 
@@ -426,9 +433,11 @@ These files exceeded the 1 MB read limit — only the first 1 MB was analyzed.
 If full coverage is needed, increase `FILE_READ_LIMIT` in `trivy_server.py`.
 ```
 
-6. If this was a pre-installation scan (temp dir), clean up:
-```bash
-rm -rf ~/.claude/tools/scan-tmp
+6. If this was a pre-installation scan from a GitHub URL (you called `clone_repo`), clean up via the MCP tool:
+
+```
+Call MCP tool: cleanup_clone
+  path: "<cleanup_path returned by clone_repo>"
 ```
 
 6. Print a one-line summary to the user:
