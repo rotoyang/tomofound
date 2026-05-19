@@ -73,68 +73,40 @@ Apply `--target` filter if specified: only include items under the matching root
 
 ---
 
-### Step 2 — Set up Trivy (for CODE items only)
+### Step 2 — CVE and secret scanning via MCP
 
-Run this script to locate or install Trivy:
+For each plugin directory tagged `CODE`, call the MCP tool instead of running Bash directly:
 
-```bash
-TRIVY_BIN=""
-if which trivy &>/dev/null; then
-  TRIVY_BIN=$(which trivy)
-elif which brew &>/dev/null; then
-  echo "Installing Trivy via Homebrew..."
-  brew install trivy -q 2>&1 && TRIVY_BIN=$(which trivy)
-else
-  echo "Downloading Trivy binary..."
-  mkdir -p ~/.claude/tools
-  LATEST=$(curl -sf https://api.github.com/repos/aquasecurity/trivy/releases/latest \
-    | grep '"tag_name"' | cut -d'"' -f4 | sed 's/v//')
-  ARCH=$(uname -m | sed 's/x86_64/64bit/' | sed 's/arm64/ARM64/')
-  curl -sfL "https://github.com/aquasecurity/trivy/releases/download/v${LATEST}/trivy_${LATEST}_macOS-${ARCH}.tar.gz" \
-    | tar xz -C ~/.claude/tools trivy 2>/dev/null
-  chmod +x ~/.claude/tools/trivy
-  TRIVY_BIN=~/.claude/tools/trivy
-fi
-echo "TRIVY_BIN=$TRIVY_BIN"
+**Scan a directory:**
+```
+Call MCP tool: scan_directory
+  path: "<absolute path to plugin directory>"
+  scanners: ["vuln", "secret"]
 ```
 
-For each plugin directory, apply this CVE detection waterfall:
+The tool returns JSON with:
+- `trivy_available`: whether Trivy was found/installed
+- `scan_level`: 1 (lock file) · 2 (manifest) · 3 (node_modules) · 4 (source only) · 5 (nothing)
+- `scan_level_desc`: human-readable description of what was used
+- `results`: Trivy JSON output, or `null` if skipped
+- `skipped_reason`: `"trivy_unavailable"` | `"no_dependency_info"` | `null`
 
-**Level 1 — Lock file exists** (most precise, exact versions)
-```bash
-$TRIVY_BIN fs <plugin-directory> --scanners vuln,secret --format json --quiet 2>/dev/null
+If `skipped_reason` is `"no_dependency_info"` (Level 5 — source code only), proceed to Level 4 fallback:
+read all source files, extract every import/require/from/use statement, collect unique
+third-party package names, then for each package:
+
+```
+Call MCP tool: check_osv
+  package: "<package name>"
+  ecosystem: "<npm|PyPI|Go|crates.io>"
 ```
 
-**Level 2 — Manifest exists but no lock file** (version ranges)
-```bash
-$TRIVY_BIN fs <plugin-directory> --scanners vuln,secret --format json --quiet 2>/dev/null
-```
-(Trivy automatically uses whatever it finds; note in report: "Scanned from manifest — versions may be imprecise")
+The tool returns `{ cve_count, vulns: [{ id, severity, summary }] }`.
+Report any package with `cve_count > 0` as `[SUPPLY_CHAIN]` severity `medium`:
+"Version unknown — package has N known CVEs across all versions."
 
-**Level 3 — node_modules exists but no manifest or lock file**
-```bash
-$TRIVY_BIN fs <plugin-directory>/node_modules --scanners vuln --format json --quiet 2>/dev/null
-```
-
-**Level 4 — Source code only (no manifest, no lock file, no node_modules)**
-Skip Trivy. Instead, instruct the LLM to:
-1. Read all source files in the plugin directory
-2. Extract every import/require/from/use statement and collect unique package names
-3. For each package, determine the ecosystem (npm / PyPI / Go / crates.io)
-4. Query the OSV API for each package:
-```bash
-curl -s "https://api.osv.dev/v1/query" \
-  -H "Content-Type: application/json" \
-  -d "{\"package\": {\"name\": \"<package>\", \"ecosystem\": \"<npm|PyPI|Go|crates.io>\"}}" \
-  | python3 -c "import sys,json; v=json.load(sys.stdin).get('vulns',[]); print(f'{len(v)} CVEs' if v else 'clean')"
-```
-Report any package that has known CVEs as `[SUPPLY_CHAIN]` with severity `medium` and note:
-"Version unknown — package has N known CVEs across all versions. Verify the installed version is not affected."
-
-**Level 5 — Nothing found**
-Note "No dependency information found — CVE scan skipped" in the report entry. This is expected for skills (.md) and simple single-file scripts.
-
-Store all Trivy JSON output. If Trivy cannot be installed, fall back to Level 4 for all plugins and note "LLM-only mode (Trivy unavailable)" in the report header.
+If `skipped_reason` is `"trivy_unavailable"`, note "Trivy unavailable — CVE scan skipped" in the
+report header and continue with LLM-only analysis.
 
 ---
 
