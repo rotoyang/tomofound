@@ -50,9 +50,12 @@ Call MCP tool: discover_targets
   path: "<absolute local path>"
 ```
 
-The tool returns `{ "items": [ { "path", "tag", "plugin" } ] }`.
-`tag` is one of: `CODE`, `MANIFEST`, `LOCKFILE`, `MCP`, `SKILL`, `CONFIG`.
-`plugin` is the plugin name (or `null` for config files).
+The tool returns `{ "items": [ { "path", "tag", "source_type", "plugin" } ] }`.
+- `tag`: `CODE`, `MANIFEST`, `LOCKFILE`, `MCP`, `SKILL`, or `CONFIG`.
+- `source_type`: `plugin`, `skill`, `mcp`, `config`, or `other` — use this to know what kind of item it is.
+- `plugin`: `publisher/plugin-name` for plugins, skill name for skills, `null` for mcp/config files.
+- `path`: absolute host filesystem path — use as-is when calling `read_file` or `scan_directory`.
+
 Use this items list as the scan target list for all subsequent steps.
 
 ---
@@ -326,13 +329,22 @@ Return ONLY a JSON object (no other text):
 }
 ```
 
+**Special case — `settings.json` with `mcpServers`:**
+After running Prompt C on `settings.json`, check if the content contains a `mcpServers` key.
+If yes, for each server entry in `mcpServers`, run **Prompt D** analysis on that entry as well
+(treat the serialized server object as the `{file content}`), and merge the findings into the
+`settings.json` report item with an added field `"source": "mcpServers.<server-name>"`.
+This ensures MCP connectors configured inline in settings.json get the same
+`MALICIOUS_LAUNCH_COMMAND` and `SUSPICIOUS_URL` checks as standalone `.mcp.json` files.
+
 ---
 
 ### Step 4 — Aggregate and render report
 
 After all analyses are complete:
 
-1. For each plugin/skill/config item:
+1. For each plugin/skill/mcp/config item:
+   - Use `source_type` from `discover_targets` to determine the item type (plugin/skill/mcp/config)
    - Merge Trivy findings (if available) with LLM findings
    - Deduplicate: if Trivy and LLM report the same issue in the same file, keep one entry and note both sources
    - Overall item risk = highest severity finding for that item
@@ -344,7 +356,7 @@ After all analyses are complete:
 ```markdown
 # 🛡 Security Scan Report — YYYY-MM-DD HH:MM
 
-**Scanned:** N plugins, M skills, K config files
+**Scanned:** N plugins, M skills, K MCP configs, K config files
 **Mode:** Trivy + LLM  (or: LLM-only — Trivy unavailable)
 **Duration:** Xs
 
@@ -364,8 +376,8 @@ After all analyses are complete:
 
 ## Results
 
-### 📦 <plugin-name>@<version> — [RISK BADGE]
-**Source:** claude-plugins-official (trusted) | unofficial (unverified)
+### 📦 Plugin: <publisher/plugin-name> — [RISK BADGE]
+**Host path:** `~/.claude/plugins/cache/<publisher>/<plugin-name>/`
 **CVE scan:** Trivy scanned (lock file) | Trivy scanned (manifest) | Skipped (no manifest found)
 
 [For each finding:]
@@ -376,17 +388,20 @@ After all analyses are complete:
 
 ---
 
-### 🔌 <plugin-name>/.mcp.json — [RISK BADGE]
+### 🔌 MCP Config: <filename> — [RISK BADGE]
+**Host path:** `<absolute path from discover_targets>`
 [Same finding format, field instead of line number]
 
 ---
 
-### 📝 <skill-name>.md — [RISK BADGE]
+### 📝 Skill: <skill-name> — [RISK BADGE]
+**Host path:** `~/.claude/skills/<skill-name>.md`
 [Same finding format]
 
 ---
 
-### 🔧 <config-path> — [RISK BADGE]
+### 🔧 Config: <filename> — [RISK BADGE]
+**Host path:** `<absolute path from discover_targets>`
 [Same finding format]
 ```
 

@@ -36,6 +36,7 @@ _STANDARD_ROOTS = {
     "claude": [
         os.path.expanduser("~/.claude/plugins/cache"),
         os.path.expanduser("~/.claude/skills"),
+        os.path.expanduser("~/.claude/.mcp.json"),
         os.path.expanduser("~/.claude/settings.json"),
         os.path.expanduser("~/.claude/config.json"),
     ],
@@ -80,10 +81,26 @@ def _plugin_from_path(path: str) -> str | None:
     if path.startswith(cache + os.sep):
         parts = path[len(cache) + 1:].split(os.sep)
         if len(parts) >= 2:
-            return parts[1]
+            return f"{parts[0]}/{parts[1]}"  # publisher/plugin-name
+        if len(parts) == 1:
+            return parts[0]
     if path.startswith(skills_dir + os.sep):
         return os.path.splitext(os.path.basename(path))[0]
     return None
+
+
+def _source_type(path: str, tag: str) -> str:
+    cache = os.path.expanduser("~/.claude/plugins/cache")
+    skills_dir = os.path.expanduser("~/.claude/skills")
+    if path.startswith(cache + os.sep):
+        return "plugin"
+    if path.startswith(skills_dir + os.sep):
+        return "skill"
+    if tag == "MCP":
+        return "mcp"
+    if tag == "CONFIG":
+        return "config"
+    return "other"
 
 
 def find_or_install_trivy() -> str | None:
@@ -183,7 +200,12 @@ def discover_targets(target: str = None, path: str = None) -> dict:
         if os.path.isfile(root):
             tag = _tag_file(root)
             if tag:
-                items.append({"path": root, "tag": tag, "plugin": _plugin_from_path(root)})
+                items.append({
+                    "path": root,
+                    "tag": tag,
+                    "source_type": _source_type(root, tag),
+                    "plugin": _plugin_from_path(root),
+                })
         else:
             for dirpath, dirs, files in os.walk(root):
                 dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
@@ -191,7 +213,12 @@ def discover_targets(target: str = None, path: str = None) -> dict:
                     fpath = os.path.join(dirpath, fname)
                     tag = _tag_file(fpath)
                     if tag:
-                        items.append({"path": fpath, "tag": tag, "plugin": _plugin_from_path(fpath)})
+                        items.append({
+                            "path": fpath,
+                            "tag": tag,
+                            "source_type": _source_type(fpath, tag),
+                            "plugin": _plugin_from_path(fpath),
+                        })
 
     return {"items": items}
 
