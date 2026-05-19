@@ -98,21 +98,43 @@ fi
 echo "TRIVY_BIN=$TRIVY_BIN"
 ```
 
-If `TRIVY_BIN` is set, run Trivy on each plugin directory using the best available source
-for CVE detection (lock files are more precise than manifests):
+For each plugin directory, apply this CVE detection waterfall:
 
+**Level 1 — Lock file exists** (most precise, exact versions)
 ```bash
-# For each plugin directory, Trivy automatically prefers lock files > manifests > node_modules
-$TRIVY_BIN fs <plugin-directory> \
-  --scanners vuln,secret \
-  --format json \
-  --quiet 2>/dev/null
+$TRIVY_BIN fs <plugin-directory> --scanners vuln,secret --format json --quiet 2>/dev/null
 ```
 
-If a plugin directory has no manifest AND no lock file AND no node_modules, skip CVE scanning
-for that plugin and note "No dependency manifest found — CVE scan skipped" in its report entry.
+**Level 2 — Manifest exists but no lock file** (version ranges)
+```bash
+$TRIVY_BIN fs <plugin-directory> --scanners vuln,secret --format json --quiet 2>/dev/null
+```
+(Trivy automatically uses whatever it finds; note in report: "Scanned from manifest — versions may be imprecise")
 
-Store the JSON output. If Trivy cannot be installed, note "LLM-only mode" in the report and continue.
+**Level 3 — node_modules exists but no manifest or lock file**
+```bash
+$TRIVY_BIN fs <plugin-directory>/node_modules --scanners vuln --format json --quiet 2>/dev/null
+```
+
+**Level 4 — Source code only (no manifest, no lock file, no node_modules)**
+Skip Trivy. Instead, instruct the LLM to:
+1. Read all source files in the plugin directory
+2. Extract every import/require/from/use statement and collect unique package names
+3. For each package, determine the ecosystem (npm / PyPI / Go / crates.io)
+4. Query the OSV API for each package:
+```bash
+curl -s "https://api.osv.dev/v1/query" \
+  -H "Content-Type: application/json" \
+  -d "{\"package\": {\"name\": \"<package>\", \"ecosystem\": \"<npm|PyPI|Go|crates.io>\"}}" \
+  | python3 -c "import sys,json; v=json.load(sys.stdin).get('vulns',[]); print(f'{len(v)} CVEs' if v else 'clean')"
+```
+Report any package that has known CVEs as `[SUPPLY_CHAIN]` with severity `medium` and note:
+"Version unknown — package has N known CVEs across all versions. Verify the installed version is not affected."
+
+**Level 5 — Nothing found**
+Note "No dependency information found — CVE scan skipped" in the report entry. This is expected for skills (.md) and simple single-file scripts.
+
+Store all Trivy JSON output. If Trivy cannot be installed, fall back to Level 4 for all plugins and note "LLM-only mode (Trivy unavailable)" in the report header.
 
 ---
 
@@ -155,6 +177,8 @@ Analyze it for security risks across these categories:
 - postinstall / preinstall scripts in package.json
 - requirements.txt / pyproject.toml / go.mod / Cargo.toml pinned to known-vulnerable versions
 - Packages that shadow standard library names
+- When no manifest or lock file is present: extract all import/require/from/use statements
+  and list every third-party package name found — these will be checked against OSV separately
 
 [PERMISSION_ABUSE]
 - Requesting broader filesystem or network access than the plugin's stated purpose requires
