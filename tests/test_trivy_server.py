@@ -172,3 +172,38 @@ def test_discover_targets_empty_dir_returns_empty():
     with tempfile.TemporaryDirectory() as d:
         result = discover_targets(path=d)
         assert result["items"] == []
+
+
+# --- read_file ---
+
+def test_read_file_returns_content(tmp_path):
+    f = tmp_path / "test.txt"
+    f.write_text("hello world")
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["content"] == "hello world"
+    assert result["size_bytes"] == len("hello world")
+    assert "truncated" not in result
+
+
+def test_read_file_truncates_large_file(tmp_path):
+    f = tmp_path / "big.txt"
+    content = "x" * (1024 * 1024 + 1)
+    f.write_text(content)
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["truncated"] is True
+    assert result["size_bytes"] == len(content)
+    assert len(result["content"]) == 1024 * 1024
+
+
+def test_read_file_rejects_unpermitted_path(tmp_path):
+    f = tmp_path / "secret.txt"
+    f.write_text("sensitive")
+    result = read_file(str(f))
+    assert "error" in result
+    assert "not permitted" in result["error"]
+
+
+def test_read_file_returns_error_for_missing_file(tmp_path):
+    result = read_file(str(tmp_path / "nonexistent.txt"), root=str(tmp_path))
+    assert "error" in result
+    assert "not found" in result["error"]
