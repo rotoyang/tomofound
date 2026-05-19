@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
 """Trivy MCP server for tomofound security-scan skill."""
-import sys, os, subprocess, json, shutil, platform, urllib.request, tempfile
+
+import sys, os
 
 VENV = os.path.expanduser("~/.claude/plugins/data/tomofound/venv")
+
+
+def _bootstrap():
+    venv_python = os.path.join(VENV, "bin", "python")
+    if not os.path.exists(venv_python):
+        import subprocess
+        subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
+        subprocess.run([os.path.join(VENV, "bin", "pip"), "install", "mcp", "--quiet"], check=True)
+    if not sys.executable.startswith(VENV):
+        os.execv(venv_python, [venv_python] + sys.argv)
+
+
+if __name__ == "__main__":
+    _bootstrap()
+
+import subprocess, json, shutil, platform, urllib.request, tempfile
+
 TOOLS_DIR = os.path.expanduser("~/.claude/tools")
 TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy")
 
@@ -86,3 +104,109 @@ def query_osv(package: str, ecosystem: str) -> dict:
         return {"cve_count": len(result_vulns), "vulns": result_vulns}
     except Exception as e:
         return {"cve_count": 0, "vulns": [], "error": str(e)}
+
+
+try:
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+    from mcp import types
+    import asyncio
+except ImportError:
+    Server = None
+
+
+if Server is not None:
+    _server = Server("tomofound-trivy")
+
+    @_server.list_tools()
+    async def _list_tools():
+        return [
+            types.Tool(
+                name="scan_directory",
+                description="Scan a directory for CVEs and secrets using Trivy. Auto-installs Trivy if needed.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path to scan"},
+                        "scanners": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Scanners: vuln, secret (default: both)",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            types.Tool(
+                name="check_osv",
+                description="Check a package against the OSV vulnerability database.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "package": {"type": "string", "description": "Package name"},
+                        "ecosystem": {
+                            "type": "string",
+                            "description": "Ecosystem: npm, PyPI, Go, crates.io",
+                        },
+                    },
+                    "required": ["package", "ecosystem"],
+                },
+            ),
+        ]
+
+    @_server.call_tool()
+    async def _call_tool(name: str, arguments: dict):
+        if name == "scan_directory":
+            path = arguments["path"]
+            scanners = arguments.get("scanners", ["vuln", "secret"])
+            trivy = find_or_install_trivy()
+            level, level_desc = detect_scan_level(path)
+
+            if not trivy:
+                payload = {"trivy_available": False, "results": None,
+                           "skipped_reason": "trivy_unavailable",
+                           "scan_level": level, "scan_level_desc": level_desc}
+                return [types.TextContent(type="text", text=json.dumps(payload))]
+
+            if level == 5:
+                payload = {"trivy_available": True, "results": None,
+                           "skipped_reason": "no_dependency_info",
+                           "scan_level": 5, "scan_level_desc": level_desc}
+                return [types.TextContent(type="text", text=json.dumps(payload))]
+
+            scan_path = path
+            if level == 3:
+                scan_path = os.path.join(path, "node_modules")
+                scanners = ["vuln"]
+
+            proc = subprocess.run(
+                [trivy, "fs", scan_path,
+                 "--scanners", ",".join(scanners),
+                 "--format", "json", "--quiet"],
+                capture_output=True, text=True, timeout=120,
+            )
+            try:
+                results = json.loads(proc.stdout) if proc.stdout.strip() else {}
+            except json.JSONDecodeError:
+                results = {"raw": proc.stdout, "stderr": proc.stderr}
+
+            payload = {"trivy_available": True, "results": results,
+                       "skipped_reason": None,
+                       "scan_level": level, "scan_level_desc": level_desc}
+            return [types.TextContent(type="text", text=json.dumps(payload))]
+
+        if name == "check_osv":
+            result = query_osv(arguments["package"], arguments["ecosystem"])
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        raise ValueError(f"Unknown tool: {name}")
+
+    async def _main():
+        async with stdio_server() as (read_stream, write_stream):
+            await _server.run(
+                read_stream, write_stream,
+                _server.create_initialization_options()
+            )
+
+    if __name__ == "__main__":
+        asyncio.run(_main())
