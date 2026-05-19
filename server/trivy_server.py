@@ -24,6 +24,67 @@ import subprocess, json, shutil, platform, urllib.request, tempfile
 TOOLS_DIR = os.path.expanduser("~/.claude/tools")
 TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy")
 
+FILE_READ_LIMIT = 1024 * 1024  # 1 MB
+
+_LOCKFILE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "go.sum", "Cargo.lock"}
+_MANIFEST_NAMES = {"package.json", "requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml"}
+_CONFIG_NAMES = {"settings.json", "config.json", "oauth_creds.json", "credentials.json"}
+_CODE_EXTS = {".ts", ".js", ".mjs", ".cjs", ".py", ".go", ".rs", ".sh", ".bash", ".zsh"}
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build", "out", ".venv", "venv"}
+
+_STANDARD_ROOTS = {
+    "claude": [
+        os.path.expanduser("~/.claude/plugins/cache"),
+        os.path.expanduser("~/.claude/skills"),
+        os.path.expanduser("~/.claude/settings.json"),
+        os.path.expanduser("~/.claude/config.json"),
+    ],
+    "gemini": [
+        os.path.expanduser("~/.gemini/settings.json"),
+        os.path.expanduser("~/.gemini/oauth_creds.json"),
+    ],
+    "openai": [
+        os.path.expanduser("~/.openai/credentials.json"),
+    ],
+}
+
+_READ_ALLOWED_PREFIXES = [
+    os.path.expanduser("~/.claude/"),
+    os.path.expanduser("~/.gemini/"),
+    os.path.expanduser("~/.openai/"),
+]
+
+
+def _tag_file(path: str) -> str | None:
+    name = os.path.basename(path)
+    ext = os.path.splitext(name)[1].lower()
+    skills_marker = os.sep + "skills" + os.sep
+    if name in _LOCKFILE_NAMES:
+        return "LOCKFILE"
+    if name in _MANIFEST_NAMES:
+        return "MANIFEST"
+    if name == ".mcp.json":
+        return "MCP"
+    if name.endswith(".md") and (skills_marker in path or path.startswith(os.path.expanduser("~/.claude/skills/"))):
+        return "SKILL"
+    if name in _CONFIG_NAMES or name.endswith(".env"):
+        return "CONFIG"
+    if ext in _CODE_EXTS:
+        return "CODE"
+    return None
+
+
+def _plugin_from_path(path: str) -> str | None:
+    cache = os.path.expanduser("~/.claude/plugins/cache")
+    skills_dir = os.path.expanduser("~/.claude/skills")
+    if path.startswith(cache + os.sep):
+        parts = path[len(cache) + 1:].split(os.sep)
+        if len(parts) >= 2:
+            return parts[1]
+    if path.startswith(skills_dir + os.sep):
+        return os.path.splitext(os.path.basename(path))[0]
+    return None
+
 
 def find_or_install_trivy() -> str | None:
     found = shutil.which("trivy")
@@ -104,6 +165,39 @@ def query_osv(package: str, ecosystem: str) -> dict:
         return {"cve_count": len(result_vulns), "vulns": result_vulns}
     except Exception as e:
         return {"cve_count": 0, "vulns": [], "error": str(e)}
+
+
+def discover_targets(target: str = None, path: str = None) -> dict:
+    if path:
+        roots = [path]
+    elif target:
+        roots = _STANDARD_ROOTS.get(target, [])
+    else:
+        roots = [r for v in _STANDARD_ROOTS.values() for r in v]
+
+    items = []
+    for root in roots:
+        root = os.path.expanduser(root)
+        if not os.path.exists(root):
+            continue
+        if os.path.isfile(root):
+            tag = _tag_file(root)
+            if tag:
+                items.append({"path": root, "tag": tag, "plugin": _plugin_from_path(root)})
+        else:
+            for dirpath, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+                for fname in files:
+                    fpath = os.path.join(dirpath, fname)
+                    tag = _tag_file(fpath)
+                    if tag:
+                        items.append({"path": fpath, "tag": tag, "plugin": _plugin_from_path(fpath)})
+
+    return {"items": items}
+
+
+def read_file(path: str, root: str = None) -> dict:
+    raise NotImplementedError
 
 
 try:
