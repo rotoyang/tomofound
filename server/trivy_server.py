@@ -197,7 +197,22 @@ def discover_targets(target: str = None, path: str = None) -> dict:
 
 
 def read_file(path: str, root: str = None) -> dict:
-    raise NotImplementedError
+    abs_path = os.path.abspath(os.path.expanduser(path))
+    allowed = list(_READ_ALLOWED_PREFIXES)
+    if root:
+        allowed.append(os.path.abspath(os.path.expanduser(root)))
+    if not any(abs_path.startswith(p) for p in allowed):
+        return {"error": "path not permitted"}
+    if not os.path.isfile(abs_path):
+        return {"error": "file not found"}
+    try:
+        size = os.path.getsize(abs_path)
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            if size <= FILE_READ_LIMIT:
+                return {"content": f.read(), "size_bytes": size}
+            return {"content": f.read(FILE_READ_LIMIT), "size_bytes": size, "truncated": True}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 try:
