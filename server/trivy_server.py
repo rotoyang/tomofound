@@ -69,4 +69,20 @@ def detect_scan_level(path: str) -> tuple[int, str]:
 
 
 def query_osv(package: str, ecosystem: str) -> dict:
-    raise NotImplementedError
+    try:
+        url = "https://api.osv.dev/v1/query"
+        body = json.dumps({"package": {"name": package, "ecosystem": ecosystem}})
+        req = urllib.request.Request(url, data=body.encode(), headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+        vulns = data.get("vulns", [])
+        result_vulns = []
+        for vuln in vulns:
+            result_vulns.append({
+                "id": vuln["id"],
+                "severity": vuln.get("database_specific", {}).get("severity", "unknown"),
+                "summary": vuln.get("summary", "")
+            })
+        return {"cve_count": len(result_vulns), "vulns": result_vulns}
+    except Exception as e:
+        return {"cve_count": 0, "vulns": [], "error": str(e)}
