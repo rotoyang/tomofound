@@ -3,7 +3,7 @@ from unittest.mock import patch, MagicMock
 import tempfile, shutil
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from server.trivy_server import find_or_install_trivy, detect_scan_level, query_osv
+from server.trivy_server import find_or_install_trivy, detect_scan_level, query_osv, discover_targets, read_file
 
 
 # --- detect_scan_level ---
@@ -118,3 +118,57 @@ def test_query_osv_network_error():
         result = query_osv("axios", "npm")
         assert result["cve_count"] == 0
         assert "error" in result
+
+
+# --- discover_targets ---
+
+def test_discover_targets_finds_code_file():
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "server.ts"), "w").close()
+        result = discover_targets(path=d)
+        paths = [i["path"] for i in result["items"]]
+        assert any("server.ts" in p for p in paths)
+        tags = [i["tag"] for i in result["items"] if "server.ts" in i["path"]]
+        assert tags == ["CODE"]
+
+
+def test_discover_targets_finds_skill_file():
+    with tempfile.TemporaryDirectory() as d:
+        skills_dir = os.path.join(d, "skills")
+        os.makedirs(skills_dir)
+        open(os.path.join(skills_dir, "my-skill.md"), "w").close()
+        result = discover_targets(path=d)
+        tags = [i["tag"] for i in result["items"] if "my-skill.md" in i["path"]]
+        assert tags == ["SKILL"]
+
+
+def test_discover_targets_finds_lockfile():
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "package-lock.json"), "w").close()
+        result = discover_targets(path=d)
+        tags = [i["tag"] for i in result["items"] if "package-lock.json" in i["path"]]
+        assert tags == ["LOCKFILE"]
+
+
+def test_discover_targets_finds_mcp_json():
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, ".mcp.json"), "w").close()
+        result = discover_targets(path=d)
+        tags = [i["tag"] for i in result["items"] if ".mcp.json" in i["path"]]
+        assert tags == ["MCP"]
+
+
+def test_discover_targets_skips_dist_dir():
+    with tempfile.TemporaryDirectory() as d:
+        dist_dir = os.path.join(d, "dist")
+        os.makedirs(dist_dir)
+        open(os.path.join(dist_dir, "bundle.js"), "w").close()
+        result = discover_targets(path=d)
+        paths = [i["path"] for i in result["items"]]
+        assert not any("bundle.js" in p for p in paths)
+
+
+def test_discover_targets_empty_dir_returns_empty():
+    with tempfile.TemporaryDirectory() as d:
+        result = discover_targets(path=d)
+        assert result["items"] == []
