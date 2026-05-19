@@ -6,22 +6,35 @@ Scans extensions installed for Claude Code, Gemini, and OpenAI for secrets, back
 
 ## Installation
 
-### Via Claude Code marketplace (once listed)
+### Step 1 — Set up the MCP server (one time only)
 
-```
-/plugin install tomofound@claude-plugins-official
-```
+Ask Claude to install it for you:
 
-Or browse via `/plugin` → Discover.
+> 「請幫我執行 https://github.com/rotoyang/tomofound 的安裝」
 
-### Manual installation (available now)
+Claude will download and run `setup.sh` using its Bash tool. When it finishes,
+**restart Claude Code Desktop App**.
+
+Or run it yourself in Terminal:
 
 ```bash
-git clone https://github.com/rotoyang/tomofound \
-  ~/.claude/plugins/cache/community/tomofound/0.1.0
+curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash
 ```
 
-Then restart Claude Code. The `/security-scan` skill will be available automatically.
+### Step 2 — Add the skill
+
+1. Download [security-scan.md](skills/security-scan/security-scan.md)
+2. Open Claude Code Desktop App → **Customize > Skills**
+3. Drag `security-scan.md` into the Skills area
+
+`/security-scan` is now available.
+
+### Updating
+
+| What changed | Action |
+|---|---|
+| Scan rules (`.md`) | Download new `security-scan.md`, drag into Customize > Skills (Replace) |
+| MCP server (`trivy_server.py`) | Ask Claude to re-run `setup.sh` |
 
 ## Usage
 
