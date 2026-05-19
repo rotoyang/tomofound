@@ -6,9 +6,22 @@ Scans extensions installed for Claude Code, Gemini, and OpenAI for secrets, back
 
 ## Installation
 
-```bash
-/install https://github.com/rotoyang/tomofound
+### Via Claude Code marketplace (once listed)
+
 ```
+/plugin install tomofound@claude-plugins-official
+```
+
+Or browse via `/plugin` → Discover.
+
+### Manual installation (available now)
+
+```bash
+git clone https://github.com/rotoyang/tomofound \
+  ~/.claude/plugins/cache/community/tomofound/0.1.0
+```
+
+Then restart Claude Code. The `/security-scan` skill will be available automatically.
 
 ## Usage
 
