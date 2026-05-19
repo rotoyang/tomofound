@@ -8,7 +8,34 @@ TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy")
 
 
 def find_or_install_trivy() -> str | None:
-    raise NotImplementedError
+    found = shutil.which("trivy")
+    if found:
+        return found
+
+    if os.path.exists(TOOLS_TRIVY):
+        return TOOLS_TRIVY
+
+    try:
+        with urllib.request.urlopen("https://api.github.com/repos/aquasecurity/trivy/releases/latest") as resp:
+            data = json.loads(resp.read())
+        version = data["tag_name"].lstrip("v")
+        machine = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip()
+        arch = "ARM64" if machine == "arm64" else "64bit"
+        url = f"https://github.com/aquasecurity/trivy/releases/download/v{version}/trivy_{version}_macOS-{arch}.tar.gz"
+        os.makedirs(TOOLS_DIR, exist_ok=True)
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+            tmp_path = tmp.name
+        urllib.request.urlretrieve(url, tmp_path)
+        import tarfile
+        with tarfile.open(tmp_path, "r:gz") as tf:
+            member = tf.getmember("trivy")
+            member.name = os.path.basename(member.name)
+            tf.extract(member, TOOLS_DIR)
+        os.unlink(tmp_path)
+        os.chmod(TOOLS_TRIVY, 0o755)
+        return TOOLS_TRIVY
+    except Exception:
+        return None
 
 
 def detect_scan_level(path: str) -> tuple[int, str]:
