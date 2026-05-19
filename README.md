@@ -59,4 +59,4 @@ Detection rules are prompt instructions inside `skills/security-scan/security-sc
 
 ## Reports
 
-Scan reports are saved to `~/.claude/security-reports/YYYY-MM-DD-HH-MM.md`.
+Scan reports are saved to `~/.claude/plugins/data/tomofound/reports/YYYY-MM-DD-HH-MM.md`.
