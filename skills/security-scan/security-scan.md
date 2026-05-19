@@ -36,40 +36,24 @@ Set scan root to `~/.claude/tools/scan-tmp/target`. Remember to delete it after 
 
 If ARGUMENTS contains a local path, use that path as scan root.
 
-Otherwise (default scan), run:
-```bash
-# Discover installed plugins and connectors (all languages, skip node_modules)
-find ~/.claude/plugins/cache -type f \( \
-  -name "*.ts" -o -name "*.js" -o -name "*.mjs" -o -name "*.cjs" \
-  -o -name "*.py" -o -name "*.go" -o -name "*.rs" \
-  -o -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \
-  -o -name "package.json" -o -name "requirements.txt" \
-  -o -name "pyproject.toml" -o -name "go.mod" -o -name "Cargo.toml" \
-  -o -name "package-lock.json" -o -name "yarn.lock" -o -name "pnpm-lock.yaml" \
-  -o -name "poetry.lock" -o -name "Pipfile.lock" -o -name "go.sum" -o -name "Cargo.lock" \
-  -o -name "*.env" \
-\) ! -path "*/.git/*" 2>/dev/null
+Otherwise, for a default scan or `--target` scan, call the MCP tool:
 
-# Discover MCP configuration files (separate category)
-find ~/.claude/plugins/cache -name ".mcp.json" 2>/dev/null
-find ~/.claude -maxdepth 2 -name ".mcp.json" 2>/dev/null
-
-# Discover installed skills
-find ~/.claude/plugins/cache -name "*.md" -path "*/skills/*" 2>/dev/null
-find ~/.claude/skills -name "*.md" 2>/dev/null 2>/dev/null
-
-# Discover config files
-ls -la \
-  ~/.claude/settings.json \
-  ~/.claude/config.json \
-  ~/.gemini/settings.json \
-  ~/.gemini/oauth_creds.json \
-  ~/.openai/credentials.json 2>/dev/null
+```
+Call MCP tool: discover_targets
+  target: <"claude" | "gemini" | "openai">  ← omit if no --target was specified
 ```
 
-Tag each discovered item as one of: `CODE` (source files), `MANIFEST` (package.json, requirements.txt, go.mod, Cargo.toml), `LOCKFILE` (package-lock.json, yarn.lock, go.sum, Cargo.lock, etc.), `MCP` (.mcp.json), `SKILL` (.md), or `CONFIG` (credential/settings files).
+For a local path argument, call:
 
-Apply `--target` filter if specified: only include items under the matching root path.
+```
+Call MCP tool: discover_targets
+  path: "<absolute local path>"
+```
+
+The tool returns `{ "items": [ { "path", "tag", "plugin" } ] }`.
+`tag` is one of: `CODE`, `MANIFEST`, `LOCKFILE`, `MCP`, `SKILL`, `CONFIG`.
+`plugin` is the plugin name (or `null` for config files).
+Use this items list as the scan target list for all subsequent steps.
 
 ---
 
@@ -112,7 +96,17 @@ report header and continue with LLM-only analysis.
 
 ### Step 3 — LLM analysis
 
-For each item, read the file content with the Read tool, then analyze using the appropriate prompt below.
+For each item, read the file content by calling the MCP tool:
+
+```
+Call MCP tool: read_file
+  path: "<item path from discover_targets>"
+  root: "<custom scan root>"  ← only needed for pre-install scans outside ~/.claude/~/.gemini/~/.openai
+```
+
+If `read_file` returns `{ "error": ... }`, skip the file and note "unreadable" in that item's report entry.
+If `read_file` returns `{ "truncated": true, ... }`, add the file to the oversized files list (see Step 4).
+Use the returned `content` field as the file content to send to the appropriate Prompt below.
 
 **Group files by plugin** (same parent directory) to reduce the number of analysis calls. Send all files from one plugin together in a single analysis request.
 
@@ -404,7 +398,20 @@ mkdir -p ~/.claude/plugins/data/tomofound/reports
 # Save report to ~/.claude/plugins/data/tomofound/reports/YYYY-MM-DD-HH-MM.md
 ```
 
-5. If this was a pre-installation scan (temp dir), clean up:
+5. If any `read_file` calls returned `truncated: true`, append this section to the report:
+
+```markdown
+## ⚠️ Oversized Files (content truncated at 1 MB)
+
+| File | Size |
+|------|------|
+| `<path>` | <size_bytes / 1048576 rounded to 1 decimal> MB |
+
+These files exceeded the 1 MB read limit — only the first 1 MB was analyzed.
+If full coverage is needed, increase `FILE_READ_LIMIT` in `trivy_server.py`.
+```
+
+6. If this was a pre-installation scan (temp dir), clean up:
 ```bash
 rm -rf ~/.claude/tools/scan-tmp
 ```
