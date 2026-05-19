@@ -45,8 +45,14 @@ find ~/.claude/plugins/cache -type f \( \
   -o -name "*.sh" -o -name "*.bash" -o -name "*.zsh" \
   -o -name "package.json" -o -name "requirements.txt" \
   -o -name "pyproject.toml" -o -name "go.mod" -o -name "Cargo.toml" \
+  -o -name "package-lock.json" -o -name "yarn.lock" -o -name "pnpm-lock.yaml" \
+  -o -name "poetry.lock" -o -name "Pipfile.lock" -o -name "go.sum" -o -name "Cargo.lock" \
   -o -name "*.env" \
-\) ! -path "*/node_modules/*" ! -path "*/.git/*" 2>/dev/null
+\) ! -path "*/.git/*" 2>/dev/null
+
+# Discover MCP configuration files (separate category)
+find ~/.claude/plugins/cache -name ".mcp.json" 2>/dev/null
+find ~/.claude -maxdepth 2 -name ".mcp.json" 2>/dev/null
 
 # Discover installed skills
 find ~/.claude/plugins/cache -name "*.md" -path "*/skills/*" 2>/dev/null
@@ -61,7 +67,7 @@ ls -la \
   ~/.openai/credentials.json 2>/dev/null
 ```
 
-Tag each discovered item as one of: `CODE` (source files + manifests), `SKILL` (`.md`), or `CONFIG` (credential/settings files).
+Tag each discovered item as one of: `CODE` (source files), `MANIFEST` (package.json, requirements.txt, go.mod, Cargo.toml), `LOCKFILE` (package-lock.json, yarn.lock, go.sum, Cargo.lock, etc.), `MCP` (.mcp.json), `SKILL` (.md), or `CONFIG` (credential/settings files).
 
 Apply `--target` filter if specified: only include items under the matching root path.
 
@@ -92,14 +98,19 @@ fi
 echo "TRIVY_BIN=$TRIVY_BIN"
 ```
 
-If `TRIVY_BIN` is set, run Trivy on each CODE plugin directory:
+If `TRIVY_BIN` is set, run Trivy on each plugin directory using the best available source
+for CVE detection (lock files are more precise than manifests):
 
 ```bash
+# For each plugin directory, Trivy automatically prefers lock files > manifests > node_modules
 $TRIVY_BIN fs <plugin-directory> \
   --scanners vuln,secret \
   --format json \
   --quiet 2>/dev/null
 ```
+
+If a plugin directory has no manifest AND no lock file AND no node_modules, skip CVE scanning
+for that plugin and note "No dependency manifest found — CVE scan skipped" in its report entry.
 
 Store the JSON output. If Trivy cannot be installed, note "LLM-only mode" in the report and continue.
 
@@ -236,6 +247,60 @@ Return ONLY a JSON object (no other text):
 
 ---
 
+#### Prompt D — MCP configuration analysis (`.mcp.json` files)
+
+```
+You are an AI security auditor reviewing an MCP (Model Context Protocol) server
+configuration file. This file defines how an MCP server process is launched and
+what environment it runs in.
+
+Analyze it for these risks:
+
+[MALICIOUS_LAUNCH_COMMAND]
+- `command` pointing to an unusual binary, a downloaded script, a path outside
+  standard locations (/usr/bin, /usr/local/bin, ~/.nvm, system node/bun/python),
+  or a temporary/writable directory
+- `args` containing shell metacharacters, pipe operators, semicolons, or backticks
+  that suggest shell injection
+- `args` that download and execute remote code (curl, wget, fetch patterns)
+
+[SECRET_LEAKAGE]
+- Hardcoded API keys, tokens, or passwords in `env` fields
+- Credentials that should come from environment variables or a keychain instead
+
+[SUSPICIOUS_URL]
+- For HTTP-type MCP servers: `url` pointing to an unrecognised, non-HTTPS,
+  or dynamically constructed endpoint
+- URLs with IP addresses instead of domain names
+- URLs that don't match the plugin's stated purpose or known vendor domains
+
+[PERMISSION_ABUSE]
+- `env` fields granting access to system-level variables unnecessarily
+- Configuration that overrides or shadows standard tool behaviour
+
+MCP config to analyze:
+<mcp>
+{file content}
+</mcp>
+
+Return ONLY a JSON object (no other text):
+{
+  "risk": "critical|high|medium|low|clean",
+  "findings": [
+    {
+      "category": "MALICIOUS_LAUNCH_COMMAND|SECRET_LEAKAGE|SUSPICIOUS_URL|PERMISSION_ABUSE",
+      "severity": "critical|high|medium|low",
+      "field": "command|args|env|url",
+      "description": "Clear description of the issue",
+      "snippet": "relevant config value"
+    }
+  ],
+  "summary": "One sentence overall assessment"
+}
+```
+
+---
+
 #### Prompt C — CONFIG analysis (credential and settings files)
 
 ```
@@ -311,12 +376,18 @@ After all analyses are complete:
 
 ### 📦 <plugin-name>@<version> — [RISK BADGE]
 **Source:** claude-plugins-official (trusted) | unofficial (unverified)
+**CVE scan:** Trivy scanned (lock file) | Trivy scanned (manifest) | Skipped (no manifest found)
 
 [For each finding:]
 **[CATEGORY]** `file.ts:42` — description
 > `relevant snippet`
 - Severity: X | Detected by: Trivy / LLM / Both
 - Recommendation: ...
+
+---
+
+### 🔌 <plugin-name>/.mcp.json — [RISK BADGE]
+[Same finding format, field instead of line number]
 
 ---
 
