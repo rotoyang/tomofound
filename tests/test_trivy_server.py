@@ -52,7 +52,7 @@ def test_detect_level5_empty():
         assert level == 5
 
 
-def test_lock_file_takes_priority_over_manifest():
+def test_detect_level1_priority_lock_over_manifest():
     with tempfile.TemporaryDirectory() as d:
         open(os.path.join(d, "package.json"), "w").close()
         open(os.path.join(d, "package-lock.json"), "w").close()
