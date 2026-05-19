@@ -206,8 +206,8 @@ def read_file(path: str, root: str = None) -> dict:
     if not os.path.isfile(abs_path):
         return {"error": "file not found"}
     try:
-        size = os.path.getsize(abs_path)
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            size = os.fstat(f.fileno()).st_size
             if size <= FILE_READ_LIMIT:
                 return {"content": f.read(), "size_bytes": size}
             return {"content": f.read(FILE_READ_LIMIT), "size_bytes": size, "truncated": True}
