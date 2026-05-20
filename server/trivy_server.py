@@ -19,54 +19,103 @@ def _bootstrap():
 if __name__ == "__main__":
     _bootstrap()
 
-import subprocess, json, shutil, platform, urllib.request, tempfile
+import subprocess, json, shutil, platform, urllib.request, tempfile, re
 
 TOOLS_DIR = os.path.expanduser("~/.claude/tools")
 TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy")
+CLONE_PREFIX = "tomofound-scan-"
+REPORTS_DIR = os.path.expanduser("~/.claude/plugins/data/tomofound/reports")
 
 FILE_READ_LIMIT = 1024 * 1024  # 1 MB
+FILE_WRITE_LIMIT = 8 * 1024 * 1024  # 8 MB
 
 _LOCKFILE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "go.sum", "Cargo.lock"}
 _MANIFEST_NAMES = {"package.json", "requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml"}
-_CONFIG_NAMES = {"settings.json", "config.json", "oauth_creds.json", "credentials.json"}
+_CONFIG_NAMES = {"settings.json", "config.json", "oauth_creds.json", "credentials.json", "auth.json", "config.toml"}
 _CODE_EXTS = {".ts", ".js", ".mjs", ".cjs", ".py", ".go", ".rs", ".sh", ".bash", ".zsh"}
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build", "out", ".venv", "venv"}
+_SKILL_DIR_MARKERS = tuple(os.sep + d + os.sep for d in ("skills", "agents", "commands", "prompts"))
 
 _STANDARD_ROOTS = {
     "claude": [
         os.path.expanduser("~/.claude/plugins/cache"),
+        os.path.expanduser("~/.claude/plugins/repos"),
         os.path.expanduser("~/.claude/skills"),
+        os.path.expanduser("~/.claude/agents"),
+        os.path.expanduser("~/.claude/commands"),
         os.path.expanduser("~/.claude/.mcp.json"),
         os.path.expanduser("~/.claude/settings.json"),
         os.path.expanduser("~/.claude/config.json"),
     ],
     "gemini": [
+        os.path.expanduser("~/.gemini/extensions"),
+        os.path.expanduser("~/.gemini/commands"),
         os.path.expanduser("~/.gemini/settings.json"),
         os.path.expanduser("~/.gemini/oauth_creds.json"),
+        os.path.expanduser("~/.gemini/.env"),
     ],
     "openai": [
-        os.path.expanduser("~/.openai/credentials.json"),
+        os.path.expanduser("~/.codex/auth.json"),
+        os.path.expanduser("~/.codex/config.toml"),
+        os.path.expanduser("~/.codex/AGENTS.md"),
+        os.path.expanduser("~/.codex/prompts"),
     ],
 }
 
 _READ_ALLOWED_PREFIXES = [
     os.path.expanduser("~/.claude/"),
     os.path.expanduser("~/.gemini/"),
-    os.path.expanduser("~/.openai/"),
+    os.path.expanduser("~/.codex/"),
 ]
+
+_WRITE_ALLOWED_PREFIXES = [
+    os.path.expanduser("~/.claude/plugins/data/tomofound/"),
+]
+
+_SENSITIVE_HOME_SUBDIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gh")
+
+_GITHUB_URL_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?$")
+
+
+def _ensure_trailing_sep(p: str) -> str:
+    return p if p.endswith(os.sep) else p + os.sep
+
+
+def _is_safe_root(root: str) -> bool:
+    """Permit custom scan roots only under HOME or a system temp dir,
+    and reject sensitive HOME subdirs (~/.ssh, ~/.aws, ...).
+    Uses realpath to defend against symlink-escape."""
+    real_root = os.path.realpath(os.path.expanduser(root))
+    home = os.path.realpath(os.path.expanduser("~"))
+    tmp_candidates = (tempfile.gettempdir(), "/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp")
+    bases = {home}
+    for t in tmp_candidates:
+        if os.path.isdir(t):
+            bases.add(os.path.realpath(t))
+    if not any(real_root == b or real_root.startswith(b + os.sep) for b in bases):
+        return False
+    for sub in _SENSITIVE_HOME_SUBDIRS:
+        blocked = os.path.join(home, sub)
+        if real_root == blocked or real_root.startswith(blocked + os.sep):
+            return False
+    return True
 
 
 def _tag_file(path: str) -> str | None:
     name = os.path.basename(path)
     ext = os.path.splitext(name)[1].lower()
-    skills_marker = os.sep + "skills" + os.sep
+    in_skill_dir = any(m in path for m in _SKILL_DIR_MARKERS) or path.startswith(os.path.expanduser("~/.claude/skills/"))
     if name in _LOCKFILE_NAMES:
         return "LOCKFILE"
     if name in _MANIFEST_NAMES:
         return "MANIFEST"
     if name == ".mcp.json":
         return "MCP"
-    if name.endswith(".md") and (skills_marker in path or path.startswith(os.path.expanduser("~/.claude/skills/"))):
+    if name == "AGENTS.md":
+        return "SKILL"
+    if name.endswith(".md") and in_skill_dir:
+        return "SKILL"
+    if ext == ".toml" and (os.sep + "commands" + os.sep) in path:
         return "SKILL"
     if name in _CONFIG_NAMES or name.endswith(".env"):
         return "CONFIG"
@@ -76,25 +125,44 @@ def _tag_file(path: str) -> str | None:
 
 
 def _plugin_from_path(path: str) -> str | None:
-    cache = os.path.expanduser("~/.claude/plugins/cache")
-    skills_dir = os.path.expanduser("~/.claude/skills")
-    if path.startswith(cache + os.sep):
-        parts = path[len(cache) + 1:].split(os.sep)
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"  # publisher/plugin-name
-        if len(parts) == 1:
-            return parts[0]
-    if path.startswith(skills_dir + os.sep):
-        return os.path.splitext(os.path.basename(path))[0]
+    nested_roots = (
+        os.path.expanduser("~/.claude/plugins/cache"),
+        os.path.expanduser("~/.claude/plugins/repos"),
+    )
+    for base in nested_roots:
+        if path.startswith(base + os.sep):
+            parts = path[len(base) + 1:].split(os.sep)
+            if len(parts) >= 2:
+                return f"{parts[0]}/{parts[1]}"  # publisher/plugin-name
+            if len(parts) == 1:
+                return parts[0]
+
+    gemini_ext = os.path.expanduser("~/.gemini/extensions")
+    if path.startswith(gemini_ext + os.sep):
+        return path[len(gemini_ext) + 1:].split(os.sep)[0]
+
+    leaf_roots = (
+        os.path.expanduser("~/.claude/skills"),
+        os.path.expanduser("~/.claude/agents"),
+        os.path.expanduser("~/.claude/commands"),
+        os.path.expanduser("~/.gemini/commands"),
+        os.path.expanduser("~/.codex/prompts"),
+    )
+    for base in leaf_roots:
+        if path.startswith(base + os.sep):
+            return os.path.splitext(os.path.basename(path))[0]
     return None
 
 
 def _source_type(path: str, tag: str) -> str:
-    cache = os.path.expanduser("~/.claude/plugins/cache")
-    skills_dir = os.path.expanduser("~/.claude/skills")
-    if path.startswith(cache + os.sep):
+    plugin_roots = (
+        os.path.expanduser("~/.claude/plugins/cache"),
+        os.path.expanduser("~/.claude/plugins/repos"),
+        os.path.expanduser("~/.gemini/extensions"),
+    )
+    if any(path.startswith(r + os.sep) for r in plugin_roots):
         return "plugin"
-    if path.startswith(skills_dir + os.sep):
+    if tag == "SKILL":
         return "skill"
     if tag == "MCP":
         return "mcp"
@@ -115,9 +183,21 @@ def find_or_install_trivy() -> str | None:
         with urllib.request.urlopen("https://api.github.com/repos/aquasecurity/trivy/releases/latest") as resp:
             data = json.loads(resp.read())
         version = data["tag_name"].lstrip("v")
-        machine = subprocess.run(["uname", "-m"], capture_output=True, text=True).stdout.strip()
-        arch = "ARM64" if machine == "arm64" else "64bit"
-        url = f"https://github.com/aquasecurity/trivy/releases/download/v{version}/trivy_{version}_macOS-{arch}.tar.gz"
+        system = platform.system()
+        machine = platform.machine().lower()
+        if system == "Darwin":
+            os_name = "macOS"
+        elif system == "Linux":
+            os_name = "Linux"
+        else:
+            return None
+        if machine in ("arm64", "aarch64"):
+            arch = "ARM64"
+        elif machine in ("x86_64", "amd64"):
+            arch = "64bit"
+        else:
+            return None
+        url = f"https://github.com/aquasecurity/trivy/releases/download/v{version}/trivy_{version}_{os_name}-{arch}.tar.gz"
         os.makedirs(TOOLS_DIR, exist_ok=True)
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             tmp_path = tmp.name
@@ -186,6 +266,8 @@ def query_osv(package: str, ecosystem: str) -> dict:
 
 def discover_targets(target: str = None, path: str = None) -> dict:
     if path:
+        if not _is_safe_root(path):
+            return {"error": "path not permitted", "items": []}
         roots = [path]
     elif target:
         roots = _STANDARD_ROOTS.get(target, [])
@@ -225,9 +307,11 @@ def discover_targets(target: str = None, path: str = None) -> dict:
 
 def read_file(path: str, root: str = None) -> dict:
     abs_path = os.path.abspath(os.path.expanduser(path))
-    allowed = list(_READ_ALLOWED_PREFIXES)
+    allowed = [_ensure_trailing_sep(p) for p in _READ_ALLOWED_PREFIXES]
     if root:
-        allowed.append(os.path.abspath(os.path.expanduser(root)))
+        if not _is_safe_root(root):
+            return {"error": "root not permitted"}
+        allowed.append(_ensure_trailing_sep(os.path.abspath(os.path.expanduser(root))))
     if not any(abs_path.startswith(p) for p in allowed):
         return {"error": "path not permitted"}
     if not os.path.isfile(abs_path):
@@ -240,6 +324,57 @@ def read_file(path: str, root: str = None) -> dict:
             return {"content": f.read(FILE_READ_LIMIT), "size_bytes": size, "truncated": True}
     except Exception as e:
         return {"error": str(e)}
+
+
+def write_file(path: str, content: str) -> dict:
+    if not isinstance(content, str):
+        return {"error": "content must be a string"}
+    encoded = content.encode("utf-8")
+    if len(encoded) > FILE_WRITE_LIMIT:
+        return {"error": f"content exceeds {FILE_WRITE_LIMIT} bytes"}
+    abs_path = os.path.abspath(os.path.expanduser(path))
+    allowed = [_ensure_trailing_sep(p) for p in _WRITE_ALLOWED_PREFIXES]
+    if not any(abs_path.startswith(p) for p in allowed):
+        return {"error": "path not permitted"}
+    try:
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        with open(abs_path, "wb") as f:
+            f.write(encoded)
+        return {"ok": True, "path": abs_path, "size_bytes": len(encoded)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def clone_repo(url: str) -> dict:
+    if not isinstance(url, str) or not _GITHUB_URL_RE.match(url):
+        return {"error": "only https://github.com/<owner>/<repo> URLs are allowed"}
+    os.makedirs(TOOLS_DIR, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix=CLONE_PREFIX, dir=TOOLS_DIR)
+    target = os.path.join(tmp_dir, "target")
+    try:
+        proc = subprocess.run(
+            ["git", "clone", "--depth", "1", "--", url, target],
+            capture_output=True, text=True, timeout=180,
+        )
+        if proc.returncode != 0:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return {"error": f"git clone failed: {proc.stderr.strip()[:200]}"}
+        return {"path": target, "cleanup_path": tmp_dir}
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {"error": str(e)}
+
+
+def cleanup_clone(path: str) -> dict:
+    abs_path = os.path.abspath(os.path.expanduser(path))
+    tools_prefix = _ensure_trailing_sep(TOOLS_DIR)
+    name = os.path.basename(abs_path.rstrip(os.sep))
+    if not abs_path.startswith(tools_prefix) or not name.startswith(CLONE_PREFIX):
+        return {"error": "path not permitted"}
+    if not os.path.isdir(abs_path):
+        return {"error": "not a directory"}
+    shutil.rmtree(abs_path, ignore_errors=True)
+    return {"ok": True}
 
 
 try:
@@ -315,8 +450,45 @@ if Server is not None:
                         "path": {"type": "string", "description": "Absolute path to the file"},
                         "root": {
                             "type": "string",
-                            "description": "Custom scan root — required for paths outside ~/.claude, ~/.gemini, ~/.openai",
+                            "description": "Custom scan root — required for paths outside ~/.claude, ~/.gemini, ~/.codex. Must be under HOME or temp dir; ~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.docker are blocked.",
                         },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            types.Tool(
+                name="write_file",
+                description="Write a file to the host filesystem. Only paths under ~/.claude/plugins/data/tomofound/ are allowed (for scan reports). UTF-8, max 8 MB.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute target path"},
+                        "content": {"type": "string", "description": "File content (UTF-8 text)"},
+                    },
+                    "required": ["path", "content"],
+                },
+            ),
+            types.Tool(
+                name="clone_repo",
+                description="Shallow-clone a public GitHub repository into a server-managed temp directory under ~/.claude/tools/. Returns the target path and a cleanup_path for cleanup_clone.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "https://github.com/<owner>/<repo>[.git] — only HTTPS GitHub URLs allowed",
+                        },
+                    },
+                    "required": ["url"],
+                },
+            ),
+            types.Tool(
+                name="cleanup_clone",
+                description="Remove a temp directory previously created by clone_repo. Only directories named tomofound-scan-* under ~/.claude/tools/ are accepted.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "cleanup_path returned by clone_repo"},
                     },
                     "required": ["path"],
                 },
@@ -328,6 +500,11 @@ if Server is not None:
         if name == "scan_directory":
             path = arguments["path"]
             scanners = arguments.get("scanners", ["vuln", "secret"])
+            if not _is_safe_root(path):
+                payload = {"trivy_available": False, "results": None,
+                           "skipped_reason": "path_not_permitted",
+                           "scan_level": None, "scan_level_desc": "path not permitted"}
+                return [types.TextContent(type="text", text=json.dumps(payload))]
             trivy = find_or_install_trivy()
             level, level_desc = detect_scan_level(path)
 
@@ -380,6 +557,21 @@ if Server is not None:
                 path=arguments["path"],
                 root=arguments.get("root"),
             )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "write_file":
+            result = write_file(
+                path=arguments["path"],
+                content=arguments["content"],
+            )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "clone_repo":
+            result = clone_repo(url=arguments["url"])
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "cleanup_clone":
+            result = cleanup_clone(path=arguments["path"])
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")
