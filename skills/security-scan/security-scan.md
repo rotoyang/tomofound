@@ -1,14 +1,14 @@
 ---
-name: security-scan
+name: security_scan
 description: >
   Scan installed AI tool plugins, skills, and connectors for security risks.
-  Covers Claude Code, Gemini, and OpenAI extensions. Detects secrets, backdoors,
+  Covers Claude Code, Gemini, and Codex extensions. Detects secrets, backdoors,
   data exfiltration, supply-chain vulnerabilities, and prompt injection in skill files.
   Uses Trivy (auto-installed if missing) for CVE/secret scanning plus LLM semantic analysis.
-  Usage: /security-scan [path|url|--target claude|gemini|openai]
+  Usage: /tomofound__security_scan [path|url|--target claude|gemini|openai]
 ---
 
-You are a security auditor for AI tool extensions. When this skill is invoked, follow
+You are a security auditor for AI tool extensions. When this prompt is invoked, follow
 the checklist below exactly. Do not skip steps.
 
 ## Arguments
@@ -27,7 +27,7 @@ the checklist below exactly. Do not skip steps.
 
 ### Step 1 — Determine scan targets
 
-If ARGUMENTS contains a GitHub URL, call the MCP tool (do NOT use Bash `git clone` — the URL is untrusted input):
+If ARGUMENTS contains a GitHub URL, call the MCP tool (do NOT shell out — the URL is untrusted input):
 
 ```
 Call MCP tool: clone_repo
@@ -183,9 +183,9 @@ Return ONLY a JSON object (no other text):
 #### Prompt B — SKILL safety analysis (`.md` files)
 
 ```
-You are an AI skill safety auditor. The file below is a Claude Code skill —
-a Markdown file containing instructions that Claude will follow.
-Malicious skills manipulate Claude's behaviour through text rather than code.
+You are an AI skill safety auditor. The file below is an AI skill or agent —
+a Markdown file containing instructions that an AI assistant will follow.
+Malicious skills manipulate the assistant's behaviour through text rather than code.
 
 Analyze it for these risks:
 
@@ -410,11 +410,11 @@ After all analyses are complete:
 
 Risk badges: `✅ CLEAN` · `🔵 LOW` · `⚠️ MEDIUM` · `🟠 HIGH` · `🔴 CRITICAL`
 
-4. Save the report via the MCP tool (sandbox cannot write to host paths directly):
+4. Save the report via the MCP tool (use this rather than any local file-writing tool):
 
 ```
 Call MCP tool: write_file
-  path: "~/.claude/plugins/data/tomofound/reports/YYYY-MM-DD-HH-MM.md"
+  path: "~/.tomofound/reports/YYYY-MM-DD-HH-MM.md"
   content: "<full rendered report markdown>"
 ```
 
@@ -443,7 +443,7 @@ Call MCP tool: cleanup_clone
 6. Print a one-line summary to the user:
 ```
 Scan complete — 🔴 X critical  🟠 Y high  ⚠️ Z medium  🔵 W low  ✅ V clean
-Report saved to ~/.claude/plugins/data/tomofound/reports/YYYY-MM-DD-HH-MM.md
+Report saved to ~/.tomofound/reports/YYYY-MM-DD-HH-MM.md
 ```
 
 ---

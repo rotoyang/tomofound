@@ -1,46 +1,57 @@
 #!/bin/bash
 set -e
 
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "tomofound currently supports macOS only. Aborting."
+  exit 1
+fi
+
 BASE_URL="https://raw.githubusercontent.com/rotoyang/tomofound/main"
-DEST="$HOME/.claude/plugins/data/tomofound/server"
+DATA_ROOT="$HOME/.tomofound"
+SERVER_DIR="$DATA_ROOT/server"
+SKILL_DIR="$DATA_ROOT/skills/security-scan"
+CONFIG_PATH="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 
-echo "Setting up tomofound security-scan MCP server..."
+echo "Setting up tomofound..."
 
-# 1. Copy server script
-mkdir -p "$DEST"
-curl -fsSL "$BASE_URL/server/trivy_server.py" -o "$DEST/trivy_server.py"
-chmod +x "$DEST/trivy_server.py"
-echo "✅ Server script installed to $DEST/trivy_server.py"
+mkdir -p "$SERVER_DIR" "$SKILL_DIR"
+curl -fsSL "$BASE_URL/server/trivy_server.py" -o "$SERVER_DIR/trivy_server.py"
+chmod +x "$SERVER_DIR/trivy_server.py"
+curl -fsSL "$BASE_URL/skills/security-scan/security-scan.md" -o "$SKILL_DIR/security-scan.md"
+echo "✅ Server + prompt source installed to $DATA_ROOT"
 
-# 2. Register MCP server in ~/.claude/settings.json
-python3 - <<PYEOF
+mkdir -p "$(dirname "$CONFIG_PATH")"
+SERVER_PATH="$SERVER_DIR/trivy_server.py" CONFIG_PATH="$CONFIG_PATH" python3 - <<'PYEOF'
 import json, os
 
-settings_path = os.path.expanduser("~/.claude/settings.json")
-with open(settings_path) as f:
-    settings = json.load(f)
+config_path = os.environ["CONFIG_PATH"]
+server_path = os.environ["SERVER_PATH"]
 
-server_entry = {
-    "command": "python3",
-    "args": [os.path.expanduser("~/.claude/plugins/data/tomofound/server/trivy_server.py")]
-}
+if os.path.exists(config_path):
+    with open(config_path) as f:
+        try:
+            config = json.load(f)
+        except json.JSONDecodeError:
+            config = {}
+else:
+    config = {}
 
-mcp = settings.setdefault("mcpServers", {})
-if mcp.get("tomofound-trivy") == server_entry:
+entry = {"command": "python3", "args": [server_path]}
+servers = config.setdefault("mcpServers", {})
+
+if servers.get("tomofound") == entry:
     print("ℹ️  MCP server already registered (no change)")
 else:
-    mcp["tomofound-trivy"] = server_entry
-    with open(settings_path, "w") as f:
-        json.dump(settings, f, indent=2)
-    print("✅ MCP server registered in ~/.claude/settings.json")
+    servers["tomofound"] = entry
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"✅ MCP server registered in {config_path}")
 PYEOF
 
 echo ""
 echo "─────────────────────────────────────────────"
 echo "Installation complete. Next steps:"
 echo ""
-echo "  1. Restart Claude Code Desktop App"
-echo "  2. Download security-scan.md from:"
-echo "     https://github.com/rotoyang/tomofound/raw/main/skills/security-scan/security-scan.md"
-echo "  3. Drag it into Customize > Skills"
+echo "  1. Quit Claude Desktop App fully (Cmd-Q) and reopen it."
+echo "  2. Type \"/\" in any chat — you should see /tomofound__security_scan."
 echo "─────────────────────────────────────────────"

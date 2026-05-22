@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Trivy MCP server for tomofound security-scan skill."""
+"""Trivy MCP server for tomofound — security scanner for AI tool extensions."""
 
 import sys, os
 
-VENV = os.path.expanduser("~/.claude/plugins/data/tomofound/venv")
+VENV = os.path.expanduser("~/.tomofound/venv")
 
 
 def _bootstrap():
@@ -21,10 +21,17 @@ if __name__ == "__main__":
 
 import subprocess, json, shutil, platform, urllib.request, tempfile, re
 
-TOOLS_DIR = os.path.expanduser("~/.claude/tools")
+DATA_ROOT = os.path.expanduser("~/.tomofound")
+TOOLS_DIR = os.path.join(DATA_ROOT, "tools")
 TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy")
 CLONE_PREFIX = "tomofound-scan-"
-REPORTS_DIR = os.path.expanduser("~/.claude/plugins/data/tomofound/reports")
+REPORTS_DIR = os.path.join(DATA_ROOT, "reports")
+
+_PROMPT_NAME = "security_scan"
+_PROMPT_SOURCE_CANDIDATES = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "security-scan", "security-scan.md"),
+    os.path.join(DATA_ROOT, "skills", "security-scan", "security-scan.md"),
+]
 
 FILE_READ_LIMIT = 1024 * 1024  # 1 MB
 FILE_WRITE_LIMIT = 8 * 1024 * 1024  # 8 MB
@@ -69,7 +76,7 @@ _READ_ALLOWED_PREFIXES = [
 ]
 
 _WRITE_ALLOWED_PREFIXES = [
-    os.path.expanduser("~/.claude/plugins/data/tomofound/"),
+    DATA_ROOT + os.sep,
 ]
 
 _SENSITIVE_HOME_SUBDIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gh")
@@ -365,6 +372,34 @@ def clone_repo(url: str) -> dict:
         return {"error": str(e)}
 
 
+def _load_prompt_source() -> str:
+    for candidate in _PROMPT_SOURCE_CANDIDATES:
+        if os.path.isfile(candidate):
+            with open(candidate, "r", encoding="utf-8") as f:
+                return f.read()
+    raise FileNotFoundError(
+        f"prompt source not found in any of: {_PROMPT_SOURCE_CANDIDATES}"
+    )
+
+
+def _strip_frontmatter(text: str) -> str:
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    if end < 0:
+        return text
+    rest = text[end + 4:]
+    return rest.lstrip("\n")
+
+
+def render_prompt(arguments: dict | None = None) -> str:
+    body = _strip_frontmatter(_load_prompt_source())
+    args_value = ""
+    if arguments:
+        args_value = str(arguments.get("args", "") or "")
+    return body.replace("ARGUMENTS", args_value) if args_value else body
+
+
 def cleanup_clone(path: str) -> dict:
     abs_path = os.path.abspath(os.path.expanduser(path))
     tools_prefix = _ensure_trailing_sep(TOOLS_DIR)
@@ -387,7 +422,38 @@ except ImportError:
 
 
 if Server is not None:
-    _server = Server("tomofound-trivy")
+    _server = Server("tomofound")
+
+    @_server.list_prompts()
+    async def _list_prompts():
+        return [
+            types.Prompt(
+                name=_PROMPT_NAME,
+                description="Scan installed AI tool plugins, skills, and connectors (Claude Code, Gemini, Codex) for secrets, backdoors, data exfiltration, supply-chain CVEs, and prompt injection.",
+                arguments=[
+                    types.PromptArgument(
+                        name="args",
+                        description="Optional. Same shape as the slash-command tail: a local path, a https://github.com/... URL, or '--target claude|gemini|openai'. Empty = scan all installed extensions.",
+                        required=False,
+                    ),
+                ],
+            ),
+        ]
+
+    @_server.get_prompt()
+    async def _get_prompt(name: str, arguments: dict | None = None):
+        if name != _PROMPT_NAME:
+            raise ValueError(f"Unknown prompt: {name}")
+        body = render_prompt(arguments)
+        return types.GetPromptResult(
+            description="tomofound security-scan checklist",
+            messages=[
+                types.PromptMessage(
+                    role="user",
+                    content=types.TextContent(type="text", text=body),
+                ),
+            ],
+        )
 
     @_server.list_tools()
     async def _list_tools():
@@ -425,7 +491,7 @@ if Server is not None:
             ),
             types.Tool(
                 name="discover_targets",
-                description="Discover all scannable AI tool extension files on the host filesystem (outside sandbox).",
+                description="Discover all scannable AI tool extension files on the host filesystem.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -450,7 +516,7 @@ if Server is not None:
                         "path": {"type": "string", "description": "Absolute path to the file"},
                         "root": {
                             "type": "string",
-                            "description": "Custom scan root — required for paths outside ~/.claude, ~/.gemini, ~/.codex. Must be under HOME or temp dir; ~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.docker are blocked.",
+                            "description": "Custom scan root — required for paths outside ~/.claude, ~/.gemini, ~/.codex. Must resolve under HOME or system temp; ~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.docker are blocked.",
                         },
                     },
                     "required": ["path"],
@@ -458,7 +524,7 @@ if Server is not None:
             ),
             types.Tool(
                 name="write_file",
-                description="Write a file to the host filesystem. Only paths under ~/.claude/plugins/data/tomofound/ are allowed (for scan reports). UTF-8, max 8 MB.",
+                description="Write a file to the host filesystem. Only paths under ~/.tomofound/ are allowed (for scan reports and temp data). UTF-8, max 8 MB.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -470,7 +536,7 @@ if Server is not None:
             ),
             types.Tool(
                 name="clone_repo",
-                description="Shallow-clone a public GitHub repository into a server-managed temp directory under ~/.claude/tools/. Returns the target path and a cleanup_path for cleanup_clone.",
+                description="Shallow-clone a public GitHub repository into a server-managed temp directory under ~/.tomofound/tools/. Returns the target path and a cleanup_path for cleanup_clone.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -484,7 +550,7 @@ if Server is not None:
             ),
             types.Tool(
                 name="cleanup_clone",
-                description="Remove a temp directory previously created by clone_repo. Only directories named tomofound-scan-* under ~/.claude/tools/ are accepted.",
+                description="Remove a temp directory previously created by clone_repo. Only directories named tomofound-scan-* under ~/.tomofound/tools/ are accepted.",
                 inputSchema={
                     "type": "object",
                     "properties": {
