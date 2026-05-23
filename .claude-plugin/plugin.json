@@ -1,9 +1,0 @@
-{
-  "name": "tomofound",
-  "version": "0.1.0",
-  "description": "Security scanner for AI tool plugins, skills, and connectors. Detects secrets, backdoors, data exfiltration, supply-chain vulnerabilities, and prompt injection across Claude Code, Gemini, and OpenAI extensions.",
-  "author": "rotoyang",
-  "skills": [
-    "skills/security-scan/security-scan.md"
-  ]
-}

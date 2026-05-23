@@ -8,6 +8,7 @@ from server.trivy_server import (
     write_file, clone_repo, cleanup_clone, _is_safe_root,
     _tag_file, _plugin_from_path, _source_type, _STANDARD_ROOTS, _READ_ALLOWED_PREFIXES,
     _WRITE_ALLOWED_PREFIXES, CLONE_PREFIX, TOOLS_DIR,
+    render_prompt, _strip_frontmatter, _load_prompt_source, _PROMPT_NAME,
 )
 
 
@@ -441,3 +442,36 @@ def test_discover_targets_rejects_sensitive_path():
     result = discover_targets(path="/etc")
     assert result.get("error") == "path not permitted"
     assert result["items"] == []
+
+
+# --- prompt loading ---
+
+def test_strip_frontmatter_removes_yaml_block():
+    text = "---\nname: foo\ndescription: bar\n---\n\nactual body\n"
+    assert _strip_frontmatter(text) == "actual body\n"
+
+
+def test_strip_frontmatter_passthrough_when_no_block():
+    text = "no frontmatter here\n"
+    assert _strip_frontmatter(text) == text
+
+
+def test_load_prompt_source_finds_skill_file():
+    body = _load_prompt_source()
+    assert "Checklist" in body or "checklist" in body
+    assert "discover_targets" in body
+
+
+def test_render_prompt_default_keeps_arguments_placeholder():
+    body = render_prompt()
+    assert "ARGUMENTS" in body
+
+
+def test_render_prompt_substitutes_args():
+    body = render_prompt({"args": "--target claude"})
+    assert "ARGUMENTS" not in body
+    assert "--target claude" in body
+
+
+def test_prompt_name_constant():
+    assert _PROMPT_NAME == "security_scan"
