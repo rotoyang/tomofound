@@ -230,6 +230,7 @@ def test_standard_roots_cover_claude_extension_dirs():
 def test_standard_roots_cover_gemini_extension_dirs():
     gemini = _STANDARD_ROOTS["gemini"]
     assert any(r.endswith("/.gemini/extensions") for r in gemini)
+    assert any(r.endswith("/.gemini/config/plugins") for r in gemini)
     assert any(r.endswith("/.gemini/commands") for r in gemini)
     assert any(r.endswith("/.gemini/settings.json") for r in gemini)
 
@@ -240,6 +241,8 @@ def test_standard_roots_openai_points_at_codex():
     assert not any("/.openai/" in r for r in openai)
     assert any(r.endswith("/.codex/auth.json") for r in openai)
     assert any(r.endswith("/.codex/config.toml") for r in openai)
+    assert any(r.endswith("/.codex/skills") for r in openai)
+    assert any(r.endswith("/.codex/plugins/cache") for r in openai)
     assert any(r.endswith("/.codex/prompts") for r in openai)
 
 
@@ -279,9 +282,29 @@ def test_source_type_gemini_extension_is_plugin():
     assert _source_type(p, "CODE") == "plugin"
 
 
+def test_source_type_gemini_config_plugin_is_plugin():
+    p = os.path.expanduser("~/.gemini/config/plugins/foo/server.ts")
+    assert _source_type(p, "CODE") == "plugin"
+
+
+def test_source_type_codex_cached_plugin_is_plugin():
+    p = os.path.expanduser("~/.codex/plugins/cache/openai-bundled/browser/1.0.0/server.ts")
+    assert _source_type(p, "CODE") == "plugin"
+
+
 def test_plugin_from_path_gemini_extension():
     p = os.path.expanduser("~/.gemini/extensions/foo/server.ts")
     assert _plugin_from_path(p) == "foo"
+
+
+def test_plugin_from_path_gemini_config_plugin():
+    p = os.path.expanduser("~/.gemini/config/plugins/foo/skills/bar/SKILL.md")
+    assert _plugin_from_path(p) == "foo"
+
+
+def test_plugin_from_path_codex_cached_plugin():
+    p = os.path.expanduser("~/.codex/plugins/cache/openai-bundled/browser/1.0.0/server.ts")
+    assert _plugin_from_path(p) == "openai-bundled/browser"
 
 
 def test_plugin_from_path_claude_agents_returns_stem():
