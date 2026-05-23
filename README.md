@@ -9,7 +9,7 @@ Scans extensions installed for Claude Code, Gemini CLI, and Codex CLI for secret
 tomofound is **install once, then use slash commands**:
 
 1. Run `setup.sh` manually one time to install the MCP server and register it with Claude
-2. From then on, invoke `/tomofound__security_scan` in any Claude session — no further setup, no per-scan installation, no Trivy install (auto-handled on first scan)
+2. From then on, invoke `/security_scan` in any Claude session — no further setup, no per-scan installation, no Trivy install (auto-handled on first scan)
 
 ## Requirements
 
@@ -24,7 +24,7 @@ tomofound is **install once, then use slash commands**:
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash
 ```
 
-Then quit Claude fully (Cmd-Q) and reopen it. Verify by typing `/` in any chat — `/tomofound__security_scan` should appear in the slash menu.
+Then quit Claude fully (Cmd-Q) and reopen it. Verify by typing `/` in any chat — `/security_scan` should appear in the slash menu.
 
 What the installer does:
 
@@ -52,22 +52,22 @@ Once installed, the slash command is always available in any Claude session. No 
 
 ```
 # Scan everything installed on this Mac
-/tomofound__security_scan
+/security_scan
 
 # Scan only Claude Code plugins / skills / agents / commands
-/tomofound__security_scan --target claude
+/security_scan --target claude
 
 # Scan only Gemini CLI config + extensions
-/tomofound__security_scan --target gemini
+/security_scan --target gemini
 
 # Scan only Codex CLI config + prompts
-/tomofound__security_scan --target openai
+/security_scan --target openai
 
 # Pre-install — scan a local directory
-/tomofound__security_scan ~/Downloads/plugin-dir/
+/security_scan ~/Downloads/plugin-dir/
 
 # Pre-install — scan a public GitHub repo
-/tomofound__security_scan https://github.com/user/plugin
+/security_scan https://github.com/user/plugin
 ```
 
 Each invocation writes a markdown report to `~/.tomofound/reports/YYYY-MM-DD-HH-MM.md`.
@@ -84,7 +84,7 @@ Trivy is auto-installed to `~/.tomofound/tools/trivy` on first scan if it isn't 
 
 ## How rules work
 
-Detection rules live in `skills/security-scan/security-scan.md` (installed locally to `~/.tomofound/skills/security-scan/security-scan.md`). The MCP server loads this file at startup and serves it as the `/tomofound__security_scan` prompt. To add a rule, edit that file in this repo, then re-run the installer — no code changes required.
+Detection rules live in `skills/security-scan/security-scan.md` (installed locally to `~/.tomofound/skills/security-scan/security-scan.md`). The MCP server loads this file at startup and serves it as the `/security_scan` prompt. To add a rule, edit that file in this repo, then re-run the installer — no code changes required.
 
 ## Reports
 
