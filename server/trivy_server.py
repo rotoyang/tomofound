@@ -56,6 +56,7 @@ _STANDARD_ROOTS = {
     ],
     "gemini": [
         os.path.expanduser("~/.gemini/extensions"),
+        os.path.expanduser("~/.gemini/config/plugins"),
         os.path.expanduser("~/.gemini/commands"),
         os.path.expanduser("~/.gemini/settings.json"),
         os.path.expanduser("~/.gemini/oauth_creds.json"),
@@ -65,6 +66,8 @@ _STANDARD_ROOTS = {
         os.path.expanduser("~/.codex/auth.json"),
         os.path.expanduser("~/.codex/config.toml"),
         os.path.expanduser("~/.codex/AGENTS.md"),
+        os.path.expanduser("~/.codex/skills"),
+        os.path.expanduser("~/.codex/plugins/cache"),
         os.path.expanduser("~/.codex/prompts"),
     ],
 }
@@ -135,6 +138,7 @@ def _plugin_from_path(path: str) -> str | None:
     nested_roots = (
         os.path.expanduser("~/.claude/plugins/cache"),
         os.path.expanduser("~/.claude/plugins/repos"),
+        os.path.expanduser("~/.codex/plugins/cache"),
     )
     for base in nested_roots:
         if path.startswith(base + os.sep):
@@ -148,11 +152,16 @@ def _plugin_from_path(path: str) -> str | None:
     if path.startswith(gemini_ext + os.sep):
         return path[len(gemini_ext) + 1:].split(os.sep)[0]
 
+    gemini_config_plugins = os.path.expanduser("~/.gemini/config/plugins")
+    if path.startswith(gemini_config_plugins + os.sep):
+        return path[len(gemini_config_plugins) + 1:].split(os.sep)[0]
+
     leaf_roots = (
         os.path.expanduser("~/.claude/skills"),
         os.path.expanduser("~/.claude/agents"),
         os.path.expanduser("~/.claude/commands"),
         os.path.expanduser("~/.gemini/commands"),
+        os.path.expanduser("~/.codex/skills"),
         os.path.expanduser("~/.codex/prompts"),
     )
     for base in leaf_roots:
@@ -166,6 +175,8 @@ def _source_type(path: str, tag: str) -> str:
         os.path.expanduser("~/.claude/plugins/cache"),
         os.path.expanduser("~/.claude/plugins/repos"),
         os.path.expanduser("~/.gemini/extensions"),
+        os.path.expanduser("~/.gemini/config/plugins"),
+        os.path.expanduser("~/.codex/plugins/cache"),
     )
     if any(path.startswith(r + os.sep) for r in plugin_roots):
         return "plugin"
