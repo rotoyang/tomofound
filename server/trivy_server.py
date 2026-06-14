@@ -21,6 +21,9 @@ if __name__ == "__main__":
 
 import subprocess, json, shutil, platform, urllib.request, tempfile, re, zipfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from python_analyzer import analyze_python  # noqa: E402
+
 DATA_ROOT = os.path.expanduser("~/.tomofound")
 TOOLS_DIR = os.path.join(DATA_ROOT, "tools")
 TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy")
@@ -734,6 +737,20 @@ if Server is not None:
                 },
             ),
             types.Tool(
+                name="analyze_python",
+                description="Run AST + lightweight taint-tracking analysis on Python files. Flags eval / exec / pickle.loads / subprocess shell=True / dynamic getattr, and reports when tainted data (env vars, sys.argv, input(), os.environ, requests.get, urlopen, MCP handler params) flows into a sink. Accepts a single .py file or a directory; directories are walked recursively. Returns { findings, files_analyzed, skipped }.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to a .py file or a directory containing Python sources.",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            types.Tool(
                 name="to_sarif",
                 description="Convert a list of standardised tomofound findings into a SARIF 2.1.0 document for CI/CD integration. Each finding object should have category, severity (critical|high|medium|low), file, line, description, and optional snippet.",
                 inputSchema={
@@ -835,6 +852,14 @@ if Server is not None:
 
         if name == "extract_zip":
             result = extract_zip(source=arguments["source"])
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "analyze_python":
+            path = arguments["path"]
+            if not _is_safe_root(path):
+                result = {"error": "path not permitted"}
+            else:
+                result = analyze_python(path=path)
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "to_sarif":

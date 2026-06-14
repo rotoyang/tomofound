@@ -108,6 +108,23 @@ Report any package with `cve_count > 0` as `[SUPPLY_CHAIN]` severity `medium`:
 If `skipped_reason` is `"trivy_unavailable"`, note "Trivy unavailable — CVE scan skipped" in the
 report header and continue with LLM-only analysis.
 
+**Static Python analysis (AST + taint tracking).** For each plugin directory or
+standalone `.py` file in the scan target list, also call:
+
+```
+Call MCP tool: analyze_python
+  path: "<absolute path to directory or .py file>"
+```
+
+The tool returns `{ findings, files_analyzed, skipped }`. Each finding has the standard
+shape (`category`, `severity`, `file`, `line`, `description`, `snippet`) plus
+`detected_by: "AST"` (direct dangerous call) or `"TAINT"` (untrusted data flowing into
+a code-execution or shell sink). Merge these into the same per-item findings list as
+Trivy and LLM results — they cover gaps LLM analysis often misses (string-obfuscated
+`eval`, cross-function dataflow within a single function). If a finding from `analyze_python`
+duplicates a Trivy or LLM finding at the same `file:line`, keep one entry and note
+`Detected by: AST+LLM` (or similar) in the report.
+
 ---
 
 ### Step 3 — LLM analysis
