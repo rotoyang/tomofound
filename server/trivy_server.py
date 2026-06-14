@@ -19,7 +19,7 @@ def _bootstrap():
 if __name__ == "__main__":
     _bootstrap()
 
-import subprocess, json, shutil, platform, urllib.request, tempfile, re
+import subprocess, json, shutil, platform, urllib.request, tempfile, re, zipfile
 
 DATA_ROOT = os.path.expanduser("~/.tomofound")
 TOOLS_DIR = os.path.join(DATA_ROOT, "tools")
@@ -35,6 +35,9 @@ _PROMPT_SOURCE_CANDIDATES = [
 
 FILE_READ_LIMIT = 1024 * 1024  # 1 MB
 FILE_WRITE_LIMIT = 8 * 1024 * 1024  # 8 MB
+ZIP_DOWNLOAD_LIMIT = 50 * 1024 * 1024  # 50 MB compressed
+ZIP_UNCOMPRESSED_LIMIT = 200 * 1024 * 1024  # 200 MB total uncompressed
+ZIP_MEMBER_LIMIT = 10000  # max entries in an archive
 
 _LOCKFILE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock", "go.sum", "Cargo.lock"}
 _MANIFEST_NAMES = {"package.json", "requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml"}
@@ -383,6 +386,152 @@ def clone_repo(url: str) -> dict:
         return {"error": str(e)}
 
 
+def _safe_extract_zip(zip_path: str, target_dir: str) -> dict | None:
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            members = zf.infolist()
+            if len(members) > ZIP_MEMBER_LIMIT:
+                return {"error": f"archive has {len(members)} entries (limit {ZIP_MEMBER_LIMIT})"}
+            total = 0
+            for m in members:
+                total += m.file_size
+                if total > ZIP_UNCOMPRESSED_LIMIT:
+                    return {"error": f"uncompressed size exceeds {ZIP_UNCOMPRESSED_LIMIT} bytes"}
+                if m.file_size > 0 and m.compress_size > 0 and m.file_size / m.compress_size > 200:
+                    return {"error": f"suspicious compression ratio for {m.filename!r}"}
+                name = m.filename
+                if name.startswith("/") or ".." in name.replace("\\", "/").split("/"):
+                    return {"error": f"unsafe archive entry: {name!r}"}
+                dest = os.path.realpath(os.path.join(target_dir, name))
+                if not dest.startswith(os.path.realpath(target_dir) + os.sep) and dest != os.path.realpath(target_dir):
+                    return {"error": f"archive entry escapes target dir: {name!r}"}
+            zf.extractall(target_dir)
+    except zipfile.BadZipFile:
+        return {"error": "not a valid zip file"}
+    except Exception as e:
+        return {"error": str(e)}
+    return None
+
+
+def extract_zip(source: str) -> dict:
+    if not isinstance(source, str) or not source:
+        return {"error": "source must be a non-empty string"}
+
+    os.makedirs(TOOLS_DIR, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix=CLONE_PREFIX, dir=TOOLS_DIR)
+    target = os.path.join(tmp_dir, "target")
+    os.makedirs(target, exist_ok=True)
+
+    try:
+        if source.startswith(("http://", "https://")):
+            if not source.lower().split("?", 1)[0].endswith(".zip"):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return {"error": "URL must point to a .zip file"}
+            zip_path = os.path.join(tmp_dir, "download.zip")
+            try:
+                with urllib.request.urlopen(source, timeout=60) as resp:
+                    written = 0
+                    with open(zip_path, "wb") as out:
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > ZIP_DOWNLOAD_LIMIT:
+                                shutil.rmtree(tmp_dir, ignore_errors=True)
+                                return {"error": f"download exceeds {ZIP_DOWNLOAD_LIMIT} bytes"}
+                            out.write(chunk)
+            except Exception as e:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return {"error": f"download failed: {e}"}
+        else:
+            abs_src = os.path.abspath(os.path.expanduser(source))
+            if not _is_safe_root(abs_src):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return {"error": "source path not permitted"}
+            if not abs_src.lower().endswith(".zip"):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return {"error": "source must be a .zip file"}
+            if not os.path.isfile(abs_src):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return {"error": "source file not found"}
+            zip_path = abs_src
+
+        err = _safe_extract_zip(zip_path, target)
+        if err:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return err
+        return {"path": target, "cleanup_path": tmp_dir}
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {"error": str(e)}
+
+
+_SARIF_LEVEL = {
+    "critical": "error",
+    "high": "error",
+    "medium": "warning",
+    "low": "note",
+    "clean": "none",
+}
+
+
+def to_sarif(findings: list, scan_root: str | None = None) -> dict:
+    rules: dict[str, dict] = {}
+    results = []
+    for f in findings or []:
+        cat = str(f.get("category") or "UNCATEGORIZED")
+        sev = str(f.get("severity") or "medium").lower()
+        if cat not in rules:
+            rules[cat] = {
+                "id": cat,
+                "name": cat,
+                "shortDescription": {"text": cat.replace("_", " ").title()},
+                "defaultConfiguration": {"level": _SARIF_LEVEL.get(sev, "warning")},
+            }
+        location: dict = {}
+        file_uri = f.get("file") or f.get("path")
+        if file_uri:
+            location["physicalLocation"] = {
+                "artifactLocation": {"uri": str(file_uri)},
+            }
+            line = f.get("line")
+            if isinstance(line, int) and line > 0:
+                location["physicalLocation"]["region"] = {"startLine": line}
+        result = {
+            "ruleId": cat,
+            "level": _SARIF_LEVEL.get(sev, "warning"),
+            "message": {"text": str(f.get("description") or "")},
+        }
+        if location:
+            result["locations"] = [location]
+        snippet = f.get("snippet")
+        if snippet:
+            result["properties"] = {"snippet": str(snippet), "severity": sev}
+        else:
+            result["properties"] = {"severity": sev}
+        results.append(result)
+
+    run = {
+        "tool": {
+            "driver": {
+                "name": "tomofound",
+                "informationUri": "https://github.com/rotoyang/tomofound",
+                "rules": list(rules.values()),
+            }
+        },
+        "results": results,
+    }
+    if scan_root:
+        run["originalUriBaseIds"] = {"SRCROOT": {"uri": str(scan_root)}}
+
+    return {
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": [run],
+    }
+
+
 def _load_prompt_source() -> str:
     for candidate in _PROMPT_SOURCE_CANDIDATES:
         if os.path.isfile(candidate):
@@ -561,13 +710,46 @@ if Server is not None:
             ),
             types.Tool(
                 name="cleanup_clone",
-                description="Remove a temp directory previously created by clone_repo. Only directories named tomofound-scan-* under ~/.tomofound/tools/ are accepted.",
+                description="Remove a temp directory previously created by clone_repo or extract_zip. Only directories named tomofound-scan-* under ~/.tomofound/tools/ are accepted.",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "cleanup_path returned by clone_repo"},
+                        "path": {"type": "string", "description": "cleanup_path returned by clone_repo or extract_zip"},
                     },
                     "required": ["path"],
+                },
+            ),
+            types.Tool(
+                name="extract_zip",
+                description="Extract a .zip archive (local path or http(s) URL ending in .zip) into a server-managed temp directory under ~/.tomofound/tools/ for pre-installation scanning. Returns the extracted target path and a cleanup_path for cleanup_clone. Rejects zip slip, oversized archives (>200 MB uncompressed), and archives with >10000 entries.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "Either an absolute local path to a .zip file or an https://.../something.zip URL.",
+                        },
+                    },
+                    "required": ["source"],
+                },
+            ),
+            types.Tool(
+                name="to_sarif",
+                description="Convert a list of standardised tomofound findings into a SARIF 2.1.0 document for CI/CD integration. Each finding object should have category, severity (critical|high|medium|low), file, line, description, and optional snippet.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "findings": {
+                            "type": "array",
+                            "description": "List of findings produced by the scan.",
+                            "items": {"type": "object"},
+                        },
+                        "scan_root": {
+                            "type": "string",
+                            "description": "Optional. Base URI for findings' file paths.",
+                        },
+                    },
+                    "required": ["findings"],
                 },
             ),
         ]
@@ -649,6 +831,17 @@ if Server is not None:
 
         if name == "cleanup_clone":
             result = cleanup_clone(path=arguments["path"])
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "extract_zip":
+            result = extract_zip(source=arguments["source"])
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "to_sarif":
+            result = to_sarif(
+                findings=arguments.get("findings", []),
+                scan_root=arguments.get("scan_root"),
+            )
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")

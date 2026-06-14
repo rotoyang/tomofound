@@ -1,4 +1,4 @@
-import os, sys, json, pytest
+import os, sys, json, pytest, zipfile, io
 from unittest.mock import patch, MagicMock
 import tempfile, shutil
 
@@ -9,6 +9,7 @@ from server.trivy_server import (
     _tag_file, _plugin_from_path, _source_type, _STANDARD_ROOTS, _READ_ALLOWED_PREFIXES,
     _WRITE_ALLOWED_PREFIXES, CLONE_PREFIX, TOOLS_DIR,
     render_prompt, _strip_frontmatter, _load_prompt_source, _PROMPT_NAME,
+    extract_zip, to_sarif, ZIP_MEMBER_LIMIT,
 )
 
 
@@ -498,3 +499,146 @@ def test_render_prompt_substitutes_args():
 
 def test_prompt_name_constant():
     assert _PROMPT_NAME == "security_scan"
+
+
+# --- extract_zip ---
+
+def _make_zip(path, entries):
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, content in entries.items():
+            zf.writestr(name, content)
+
+
+def test_extract_zip_local_ok(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    zip_path = tmp_path / "skill.zip"
+    _make_zip(zip_path, {"SKILL.md": "# hello\n", "src/foo.py": "print(1)\n"})
+
+    result = extract_zip(str(zip_path))
+    assert "path" in result, result
+    assert os.path.isdir(result["path"])
+    assert os.path.exists(os.path.join(result["path"], "SKILL.md"))
+    assert os.path.exists(os.path.join(result["path"], "src", "foo.py"))
+    shutil.rmtree(result["cleanup_path"], ignore_errors=True)
+
+
+def test_extract_zip_rejects_non_zip_extension(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    txt = tmp_path / "data.txt"
+    txt.write_text("hi")
+    result = extract_zip(str(txt))
+    assert "error" in result and ".zip" in result["error"]
+
+
+def test_extract_zip_rejects_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    result = extract_zip(str(tmp_path / "missing.zip"))
+    assert "error" in result
+
+
+def test_extract_zip_rejects_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    zip_path = tmp_path / "evil.zip"
+    _make_zip(zip_path, {"../escape.txt": "pwned"})
+    result = extract_zip(str(zip_path))
+    assert "error" in result and "unsafe" in result["error"].lower()
+
+
+def test_extract_zip_rejects_absolute_path_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    zip_path = tmp_path / "evil.zip"
+    _make_zip(zip_path, {"/etc/evil": "pwned"})
+    result = extract_zip(str(zip_path))
+    assert "error" in result
+
+
+def test_extract_zip_rejects_too_many_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    monkeypatch.setattr("server.trivy_server.ZIP_MEMBER_LIMIT", 2)
+    zip_path = tmp_path / "big.zip"
+    _make_zip(zip_path, {"a": "1", "b": "2", "c": "3"})
+    result = extract_zip(str(zip_path))
+    assert "error" in result and "entries" in result["error"]
+
+
+def test_extract_zip_rejects_bad_zip(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    fake = tmp_path / "fake.zip"
+    fake.write_text("not actually a zip")
+    result = extract_zip(str(fake))
+    assert "error" in result
+
+
+def test_extract_zip_rejects_url_without_zip_suffix(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    result = extract_zip("https://example.com/something.tar.gz")
+    assert "error" in result and ".zip" in result["error"]
+
+
+def test_extract_zip_rejects_unsafe_local_path(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    result = extract_zip("/etc/shadow.zip")
+    assert "error" in result
+
+
+def test_extract_zip_rejects_empty_source():
+    assert "error" in extract_zip("")
+
+
+# --- to_sarif ---
+
+def test_to_sarif_basic_structure():
+    findings = [{
+        "category": "BACKDOOR",
+        "severity": "critical",
+        "file": "src/evil.py",
+        "line": 7,
+        "description": "Uses eval on remote input",
+        "snippet": "eval(requests.get(url).text)",
+    }]
+    doc = to_sarif(findings)
+    assert doc["version"] == "2.1.0"
+    assert doc["runs"][0]["tool"]["driver"]["name"] == "tomofound"
+    rules = doc["runs"][0]["tool"]["driver"]["rules"]
+    assert any(r["id"] == "BACKDOOR" for r in rules)
+    res = doc["runs"][0]["results"][0]
+    assert res["ruleId"] == "BACKDOOR"
+    assert res["level"] == "error"
+    assert res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/evil.py"
+    assert res["locations"][0]["physicalLocation"]["region"]["startLine"] == 7
+    assert res["properties"]["snippet"] == "eval(requests.get(url).text)"
+
+
+def test_to_sarif_severity_mapping():
+    findings = [
+        {"category": "A", "severity": "critical", "description": "c"},
+        {"category": "B", "severity": "high", "description": "h"},
+        {"category": "C", "severity": "medium", "description": "m"},
+        {"category": "D", "severity": "low", "description": "l"},
+    ]
+    results = to_sarif(findings)["runs"][0]["results"]
+    levels = [r["level"] for r in results]
+    assert levels == ["error", "error", "warning", "note"]
+
+
+def test_to_sarif_empty_findings():
+    doc = to_sarif([])
+    assert doc["runs"][0]["results"] == []
+    assert doc["runs"][0]["tool"]["driver"]["rules"] == []
+
+
+def test_to_sarif_finding_without_file():
+    doc = to_sarif([{
+        "category": "PROMPT_INJECTION",
+        "severity": "high",
+        "description": "Skill-level injection — no file context",
+    }])
+    res = doc["runs"][0]["results"][0]
+    assert "locations" not in res
+    assert res["ruleId"] == "PROMPT_INJECTION"
+
+
+def test_to_sarif_with_scan_root():
+    doc = to_sarif([{"category": "X", "severity": "low", "description": "d"}],
+                   scan_root="/tmp/scan")
+    assert doc["runs"][0]["originalUriBaseIds"]["SRCROOT"]["uri"] == "/tmp/scan"
