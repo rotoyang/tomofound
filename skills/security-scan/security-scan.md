@@ -37,7 +37,17 @@ Call MCP tool: clone_repo
 The tool returns `{ "path": "<scan root>", "cleanup_path": "<temp dir>" }` or `{ "error": ... }`.
 Use `path` as the scan root for subsequent steps. Remember `cleanup_path` — pass it to `cleanup_clone` after the scan.
 
-If ARGUMENTS contains a local path, use that path as scan root.
+If ARGUMENTS points to a `.zip` archive (local path ending in `.zip`, or an `http(s)://...zip` URL), call:
+
+```
+Call MCP tool: extract_zip
+  source: "<ARGUMENTS>"
+```
+
+The tool returns `{ "path": "<extracted scan root>", "cleanup_path": "<temp dir>" }` or `{ "error": ... }`.
+The cleanup contract is identical to `clone_repo` — pass `cleanup_path` to `cleanup_clone` once the scan finishes.
+
+If ARGUMENTS contains a local directory path (not a `.zip`), use that path as scan root.
 
 Otherwise, for a default scan or `--target` scan, call the MCP tool:
 
@@ -462,15 +472,48 @@ Risk badges: `✅ CLEAN` · `🔵 LOW` · `⚠️ MEDIUM` · `🟠 HIGH` · `�
 Each per-item heading should also include the item's risk score, e.g.
 `### 📦 Plugin: foo/bar — 🟠 HIGH (score 28/100)`.
 
-5. Save the report via the MCP tool (use this rather than any local file-writing tool):
+5. Save the report in three formats so it is useful both for humans and CI pipelines.
+   Use the same `YYYY-MM-DD-HH-MM` timestamp for all three so they group naturally.
 
-```
-Call MCP tool: write_file
-  path: "~/.tomofound/reports/YYYY-MM-DD-HH-MM.md"
-  content: "<full rendered report markdown>"
-```
+   **a. Markdown** (human-readable, primary output):
 
-The tool creates parent directories automatically. If it returns `{ "error": ... }`, surface the error to the user.
+   ```
+   Call MCP tool: write_file
+     path: "~/.tomofound/reports/YYYY-MM-DD-HH-MM.md"
+     content: "<full rendered report markdown>"
+   ```
+
+   **b. JSON** (structured raw findings — every finding from every item with full
+   metadata: `category`, `severity`, `file`, `line`, `description`, `snippet`,
+   `source` (`Trivy`, `LLM`, or `Both`), plus top-level `score`, `recommendation`,
+   `summary_counts`, and `items`):
+
+   ```
+   Call MCP tool: write_file
+     path: "~/.tomofound/reports/YYYY-MM-DD-HH-MM.json"
+     content: "<json.dumps(...) of the structured report>"
+   ```
+
+   **c. SARIF 2.1.0** (for CI/CD upload — GitHub code-scanning, Azure DevOps,
+   GitLab, etc.). Call `to_sarif` with the flat list of every finding, then
+   write the returned document:
+
+   ```
+   Call MCP tool: to_sarif
+     findings: [ <flat list of all findings from all items> ]
+     scan_root: "<scan root path, if pre-installation scan>"   ← optional, omit otherwise
+   ```
+
+   The tool returns a SARIF JSON document. Persist it:
+
+   ```
+   Call MCP tool: write_file
+     path: "~/.tomofound/reports/YYYY-MM-DD-HH-MM.sarif"
+     content: "<json.dumps(sarif document)>"
+   ```
+
+   `write_file` creates parent directories automatically. If any call returns
+   `{ "error": ... }`, surface the error to the user.
 
 6. If any `read_file` calls returned `truncated: true`, append this section to the report:
 
@@ -495,7 +538,7 @@ Call MCP tool: cleanup_clone
 8. Print a one-line summary to the user, leading with the overall risk score and badge:
 ```
 Scan complete — <score>/100 [BADGE]  🔴 X critical  🟠 Y high  ⚠️ Z medium  🔵 W low  ✅ V clean
-Report saved to ~/.tomofound/reports/YYYY-MM-DD-HH-MM.md
+Reports saved to ~/.tomofound/reports/YYYY-MM-DD-HH-MM.{md,json,sarif}
 ```
 
 ---
