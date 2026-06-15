@@ -2,7 +2,7 @@
 
 Security scanner for AI tool plugins, skills, and connectors.
 
-Scans extensions installed for Claude Code, Gemini CLI, and Codex CLI for secrets, backdoors, data exfiltration, supply-chain vulnerabilities, and prompt injection — before or after installation.
+Scans extensions installed for Claude Code, Gemini CLI, and Codex CLI for secrets, backdoors, data exfiltration, supply-chain vulnerabilities, prompt injection, MCP tool poisoning, and memory poisoning — before or after installation. Combines Trivy CVE/secret scanning, Python AST + taint-tracking static analysis, and optional LLM semantic review, then emits a 0–100 risk score with an install recommendation.
 
 ## How it works
 
@@ -87,23 +87,39 @@ Once installed, the scan entry point is always available in configured apps. No 
 
 # Pre-install — scan a public GitHub repo
 /security_scan https://github.com/user/plugin
+
+# Pre-install — scan a .zip archive (local path or https URL)
+/security_scan ~/Downloads/plugin.zip
+/security_scan https://example.com/plugin.zip
 ```
 
 ### Codex
 
-Invoke the `security-scan` skill when asking Codex to audit installed extensions, a local path, or a public GitHub repository. Codex uses the same Tomofound MCP server and writes reports to the same `~/.tomofound/reports/` directory.
-
-Each invocation writes a markdown report to `~/.tomofound/reports/YYYY-MM-DD-HH-MM.md`.
+Invoke the `security-scan` skill when asking Codex to audit installed extensions, a local path, a `.zip` archive, or a public GitHub repository. Codex uses the same Tomofound MCP server and writes reports to the same `~/.tomofound/reports/` directory.
 
 ## What it scans
 
 | Item | Method | Detects |
 |------|--------|---------|
-| Plugins & connectors (`.ts` `.js` `.py` `.go` `.rs` `.sh`) | Trivy + LLM | Secrets, backdoors, data exfiltration, CVEs, supply-chain issues |
-| Skills, agents, prompts (`.md`, `AGENTS.md`) | LLM | Prompt injection, behaviour override, social engineering |
+| Plugins & connectors (`.ts` `.js` `.py` `.go` `.rs` `.sh`) | Trivy + AST/taint + LLM | Secrets, backdoors, data exfiltration, CVEs, supply-chain issues, MCP tool poisoning |
+| Skills, agents, prompts (`.md`, `AGENTS.md`) | LLM | Prompt injection, behaviour override, memory poisoning, system prompt leakage, social engineering |
+| MCP configs (`.mcp.json`, inline `mcpServers`) | LLM | Malicious launch commands, suspicious URLs, hardcoded credentials |
 | Config files (`settings.json`, `oauth_creds.json`, `auth.json`, `config.toml`) | LLM | Plaintext credentials, overly permissive settings |
 
+Python sources additionally get **AST analysis** (catches `eval` / `exec` / `pickle.loads` / `subprocess(shell=True)` / obfuscated dynamic dispatch) and **taint tracking** (flags untrusted input — env vars, `sys.argv`, `input()`, network responses, MCP handler arguments — flowing into a code-execution or shell sink).
+
 Trivy is auto-installed to `~/.tomofound/tools/trivy` on first scan if it isn't already on `PATH`.
+
+## Risk score
+
+Each scan produces a 0–100 risk score (severity-weighted across all findings) and an install recommendation:
+
+| Score | Recommendation |
+|-------|----------------|
+| 0 | ✅ Safe |
+| 1–15 | 🔵 Caution |
+| 16–50 | ⚠️ High Risk |
+| 51–100 | 🚫 Avoid |
 
 ## How rules work
 
@@ -111,4 +127,10 @@ Detection rules live in `skills/security-scan/security-scan.md` (installed local
 
 ## Reports
 
-Scan reports are saved to `~/.tomofound/reports/YYYY-MM-DD-HH-MM.md`.
+Each scan writes three files under `~/.tomofound/reports/`, sharing a `YYYY-MM-DD-HH-MM` timestamp:
+
+| File | Format | Use |
+|------|--------|-----|
+| `*.md` | Markdown | Human-readable report (primary) |
+| `*.json` | JSON | Structured raw findings, score, and counts |
+| `*.sarif` | SARIF 2.1.0 | CI/CD upload (GitHub code scanning, Azure DevOps, GitLab) |
