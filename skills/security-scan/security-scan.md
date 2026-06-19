@@ -139,6 +139,54 @@ Trivy and LLM results — they cover gaps LLM analysis often misses (string-obfu
 duplicates a Trivy or LLM finding at the same `file:line`, keep one entry and note
 `Detected by: AST+LLM` (or similar) in the report.
 
+**Agent Threat Rules (ATR) regex pre-filter.** Before running LLM semantic analysis,
+match the cached ATR catalog against every skill / agent / prompt / config / MCP-
+exchange-shaped target. ATR is a community-maintained YAML rule format for AI-agent
+threats (Sigma-style); we run it as a fast deterministic pre-filter so well-known
+attack patterns (instruction overrides, encoded payloads, DAN family, system-prompt
+extraction, etc.) get caught with a stable rule ID and references to OWASP Agentic
+Top 10 / MITRE ATLAS / CVE before paying for LLM tokens.
+
+First, check the catalog is present:
+
+```
+Call MCP tool: atr_status
+```
+
+The tool returns `{available, version, rules_compiled, categories, license, attribution}`
+or `{available: false, reason}`. Add a one-line ATR status entry to the report header
+either way. If `available` is false, tell the user how to populate it:
+
+```
+Call MCP tool: atr_update
+```
+
+`atr_update` is the only network-touching step in the pipeline — it is **never**
+auto-run. Once it succeeds, the catalog lives at `~/.tomofound/catalogs/atr/` and
+all subsequent scans are offline.
+
+For each target whose `read_file` content has already been loaded for LLM analysis
+(see Step 3), additionally call:
+
+```
+Call MCP tool: atr_match
+  content: "<the file body>"
+  file_hint: "<the item path so findings carry it>"
+```
+
+The tool returns `{ findings, rules_evaluated }` or `{ findings: [], catalog_missing: true }`.
+Each finding has the standard shape plus `detected_by: "ATR"` and a `provenance` block
+with the source rule's `rule_id`, `catalog_version`, `rule_category`, `rule_maturity`,
+and `references` (OWASP Agentic / MITRE ATLAS / CVE). Merge these into the per-item
+findings list. In the rendered report, surface the rule ID and references inline so
+the user can audit upstream — example:
+
+> Detected by ATR-2026-00001 (v3.5.0) · refs OWASP ASI01:2026 · MITRE AML.T0051
+
+If `catalog_missing: true`, do not block the scan — proceed with LLM-only coverage
+for prompt-injection / tool-poisoning / similar categories and note `ATR pre-filter
+skipped — run atr_update to enable` in the report header.
+
 ---
 
 ### Step 3 — LLM analysis
