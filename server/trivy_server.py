@@ -5,13 +5,16 @@ import sys, os
 
 VENV = os.path.expanduser("~/.tomofound/venv")
 
+# Pinned dependency — when bumping, also update the Supply chain table in README.md.
+_MCP_PIN = "mcp==1.28.0"
+
 
 def _bootstrap():
     venv_python = os.path.join(VENV, "bin", "python")
     if not os.path.exists(venv_python):
         import subprocess
         subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
-        subprocess.run([os.path.join(VENV, "bin", "pip"), "install", "mcp", "--quiet"], check=True)
+        subprocess.run([os.path.join(VENV, "bin", "pip"), "install", _MCP_PIN, "--quiet"], check=True)
     if not sys.executable.startswith(VENV):
         os.execv(venv_python, [venv_python] + sys.argv)
 

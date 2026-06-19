@@ -134,3 +134,40 @@ Each scan writes three files under `~/.tomofound/reports/`, sharing a `YYYY-MM-D
 | `*.md` | Markdown | Human-readable report (primary) |
 | `*.json` | JSON | Structured raw findings, score, and counts |
 | `*.sarif` | SARIF 2.1.0 | CI/CD upload (GitHub code scanning, Azure DevOps, GitLab) — Trivy CVEs, secrets, and misconfigurations are normalised into the same finding shape as AST / taint / LLM findings, so every result has a rule ID and file location |
+
+## Supply chain
+
+tomofound is itself a piece of software you run with elevated trust, so we list every external dependency and outbound network call it makes. **Source changes that touch this list MUST update the tables below in the same PR** (the repo-root `CLAUDE.md` enforces this for AI-assisted contributions).
+
+### Runtime dependencies
+
+| Component | Version | Source | Notes |
+|-----------|---------|--------|-------|
+| Python `mcp` SDK | `1.28.0` (exact pin) | https://pypi.org/project/mcp/ | Installed into `~/.tomofound/venv` on first server start by `_bootstrap()` (see `server/trivy_server.py`). Bump the `_MCP_PIN` constant + this table together. |
+| Trivy CLI | auto-installed *latest stable* | https://github.com/aquasecurity/trivy | Resolved via `https://api.github.com/repos/aquasecurity/trivy/releases/latest` on first scan, then cached at `~/.tomofound/tools/trivy`. Not pinned — Trivy ships CVE database auto-updates anyway, so pinning the binary alone wouldn't make the scan reproducible. |
+| host Python 3 | `≥3.9` | macOS system | Required for the bootstrap venv. Preinstalled on macOS. |
+| host `git` | any recent | macOS system | Required only when scanning a `https://github.com/...` URL via `clone_repo`. |
+| Python stdlib | (whatever the host Python ships) | https://docs.python.org/3/library/ | `ast`, `ipaddress`, `socket`, `subprocess`, `tempfile`, `urllib`, `zipfile`, etc. |
+
+### Outbound network calls
+
+| URL pattern | Purpose | Who triggers it |
+|-------------|---------|-----------------|
+| `https://api.github.com/repos/aquasecurity/trivy/releases/latest` | Look up Trivy version to download | First scan, when Trivy isn't on `PATH` |
+| `https://github.com/aquasecurity/trivy/releases/download/...` | Download the Trivy binary | First scan, after the lookup above |
+| `https://api.osv.dev/v1/query` | OSV vulnerability lookup (Level-4 fallback when Trivy has no dependency manifest) | The `check_osv` MCP tool |
+| `https://github.com/<owner>/<repo>(.git)` | `git clone --depth 1` for pre-install scan of a GitHub URL | The `clone_repo` MCP tool |
+| `https://<host>/<path>.zip` | Download a `.zip` for pre-install scan | The `extract_zip` MCP tool — **https only**, refuses private / loopback / link-local / cloud-metadata hosts, re-validates every redirect target |
+| `https://raw.githubusercontent.com/rotoyang/tomofound/main/...` | Installer fetches its own source | `setup.sh` only |
+
+### Repository assets
+
+| Asset | Source | Notes |
+|-------|--------|-------|
+| `server/trivy_server.py` | This repo | The MCP server itself |
+| `server/python_analyzer.py` | This repo | AST + taint static analysis |
+| `skills/security-scan/security-scan.md` | This repo | Detection rules loaded as an MCP prompt |
+| `integrations/codex/skills/security-scan/SKILL.md` | This repo | Codex-side wrapper around the same MCP tools |
+| `setup.sh` | This repo | One-shot installer |
+
+No third-party Python wheels are vendored, no binary blobs ship in the repo, and the installer touches only `~/.tomofound/`, `~/Library/Application Support/Claude/claude_desktop_config.json`, and (if Codex is selected) `~/.codex/config.toml` + `~/.codex/skills/security-scan/`.
