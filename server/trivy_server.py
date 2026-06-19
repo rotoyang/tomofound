@@ -5,16 +5,48 @@ import sys, os
 
 VENV = os.path.expanduser("~/.tomofound/venv")
 
-# Pinned dependency — when bumping, also update the Supply chain table in README.md.
-_MCP_PIN = "mcp==1.28.0"
+# Pinned dependencies — when bumping any entry, also update the Supply chain
+# table in README.md (see CLAUDE.md). Use lower bounds so security patches
+# from upstream can ship; pin upper bounds at the next major to block
+# breaking changes.
+_PIP_DEPS = [
+    "mcp==1.28.0",
+    "PyYAML>=6.0,<7",
+]
+_MCP_PIN = _PIP_DEPS[0]  # back-compat name for any external reader of the constant
+
+# Bump this string when _PIP_DEPS changes so existing venvs auto-reinstall the
+# new set on next server start. The bootstrap writes the current value to
+# ~/.tomofound/venv/.tomofound-deps; mismatch triggers a pip install --upgrade.
+_DEPS_VERSION = "2"
 
 
 def _bootstrap():
     venv_python = os.path.join(VENV, "bin", "python")
-    if not os.path.exists(venv_python):
+    marker = os.path.join(VENV, ".tomofound-deps")
+    deps_current = None
+    if os.path.isfile(marker):
+        try:
+            with open(marker) as f:
+                deps_current = f.read().strip()
+        except OSError:
+            deps_current = None
+
+    if not os.path.exists(venv_python) or deps_current != _DEPS_VERSION:
         import subprocess
-        subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
-        subprocess.run([os.path.join(VENV, "bin", "pip"), "install", _MCP_PIN, "--quiet"], check=True)
+        if not os.path.exists(venv_python):
+            subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
+        subprocess.run(
+            [os.path.join(VENV, "bin", "pip"), "install", *_PIP_DEPS,
+             "--upgrade", "--quiet"],
+            check=True,
+        )
+        try:
+            with open(marker, "w") as f:
+                f.write(_DEPS_VERSION)
+        except OSError:
+            pass  # marker is an optimisation, not a correctness gate
+
     if not sys.executable.startswith(VENV):
         os.execv(venv_python, [venv_python] + sys.argv)
 
@@ -27,6 +59,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from python_analyzer import analyze_python  # noqa: E402
+import atr_catalog  # noqa: E402
 
 DATA_ROOT = os.path.expanduser("~/.tomofound")
 TOOLS_DIR = os.path.join(DATA_ROOT, "tools")
@@ -904,6 +937,34 @@ if Server is not None:
                     "required": ["results"],
                 },
             ),
+            types.Tool(
+                name="atr_update",
+                description="Download and cache the pinned Agent Threat Rules (ATR) catalog locally at ~/.tomofound/catalogs/atr/. User-initiated only — never auto-run. Verifies the upstream LICENSE is still MIT before trusting the tarball, extracts only the rules/ subtree and LICENSE, parses YAML rules into a regex catalog. Returns {ok, version, rules_compiled, categories, tarball_sha256} on success or {error} on any failure (previous cache is preserved).",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            types.Tool(
+                name="atr_match",
+                description="Run the cached ATR regex catalog against scan-target content. Returns {findings, rules_evaluated} where each finding carries provenance.source='atr', rule_id, catalog_version, and upstream references (OWASP Agentic, MITRE ATLAS, CVE). Offline — never blocks on network. If the catalog isn't cached yet, returns {findings: [], catalog_missing: true} and the report header should advise the user to run atr_update.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The scan-target content (skill markdown body, MCP exchange transcript, prompt template, ...). Matched as a single string.",
+                        },
+                        "file_hint": {
+                            "type": "string",
+                            "description": "Optional path to attribute findings to — copied into each finding's `file` field for downstream report rendering.",
+                        },
+                    },
+                    "required": ["content"],
+                },
+            ),
+            types.Tool(
+                name="atr_status",
+                description="Read-only check of the local ATR catalog state: version, rule count, license, attribution string. Used by report headers and the user-facing freshness display. Never blocks on network.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
         ]
 
     @_server.call_tool()
@@ -1006,6 +1067,21 @@ if Server is not None:
 
         if name == "normalize_trivy":
             result = normalize_trivy(results=arguments.get("results") or {})
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "atr_update":
+            result = atr_catalog.update_catalog()
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "atr_match":
+            result = atr_catalog.match_content(
+                content=arguments.get("content") or "",
+                file_hint=arguments.get("file_hint"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "atr_status":
+            result = atr_catalog.catalog_status()
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")

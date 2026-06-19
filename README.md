@@ -143,12 +143,14 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 
 | Component | Version | License | Source | Notes |
 |-----------|---------|---------|--------|-------|
-| Python `mcp` SDK | `1.28.0` (exact pin) | [MIT](https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE) | https://pypi.org/project/mcp/ | Installed into `~/.tomofound/venv` on first server start by `_bootstrap()` (see `server/trivy_server.py`). Bump the `_MCP_PIN` constant + this table together. |
+| Python `mcp` SDK | `1.28.0` (exact pin) | [MIT](https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE) | https://pypi.org/project/mcp/ | Installed into `~/.tomofound/venv` on first server start by `_bootstrap()` (see `server/trivy_server.py`). Bump the `_PIP_DEPS` list + this table together. |
+| Python `PyYAML` | `>=6.0,<7` | [MIT](https://github.com/yaml/pyyaml/blob/main/LICENSE) | https://pypi.org/project/PyYAML/ | Installed alongside `mcp` by `_bootstrap()`. Parses the Agent Threat Rules YAML catalog. |
 | Trivy CLI | auto-installed *latest stable* | [Apache-2.0](https://github.com/aquasecurity/trivy/blob/main/LICENSE) | https://github.com/aquasecurity/trivy | Resolved via `https://api.github.com/repos/aquasecurity/trivy/releases/latest` on first scan, then cached at `~/.tomofound/tools/trivy`. Not pinned — Trivy ships CVE database auto-updates anyway, so pinning the binary alone wouldn't make the scan reproducible. |
 | OSV vulnerability API | API v1 (live) | [Apache-2.0](https://github.com/google/osv.dev/blob/master/LICENSE) (engine); upstream advisory licenses for individual entries | https://osv.dev | Queried by the `check_osv` MCP tool as a fallback when Trivy has no dependency manifest. Findings cite the OSV advisory ID. |
+| Agent Threat Rules (ATR) catalog | `v3.5.0` (pinned in `server/atr_catalog.py:ATR_PIN`) | [MIT](https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/v3.5.0/LICENSE) | https://github.com/Agent-Threat-Rule/agent-threat-rules | Source tarball downloaded by the user-initiated `atr_update` MCP tool, then cached at `~/.tomofound/catalogs/atr/` (rules + LICENSE retained per MIT). Never auto-updated; `atr_update` re-verifies the upstream LICENSE is still MIT before trusting a new tarball. We use ATR as a regex pre-filter — findings cite rule IDs (`ATR-YYYY-NNNNN`) and upstream references (OWASP Agentic / MITRE ATLAS / CVE). |
 | host Python 3 | `≥3.9` | [PSF License](https://docs.python.org/3/license.html) | macOS system | Required for the bootstrap venv. Preinstalled on macOS. |
 | host `git` | any recent | [GPL-2.0](https://git-scm.com/about/free-and-open-source) | macOS system | Required only when scanning a `https://github.com/...` URL via `clone_repo`. Used as a CLI subprocess; we do not link git as a library. |
-| Python stdlib | ships with host Python | [PSF License](https://docs.python.org/3/license.html) | https://docs.python.org/3/library/ | `ast`, `ipaddress`, `socket`, `subprocess`, `tempfile`, `urllib`, `zipfile`, etc. |
+| Python stdlib | ships with host Python | [PSF License](https://docs.python.org/3/license.html) | https://docs.python.org/3/library/ | `ast`, `ipaddress`, `socket`, `subprocess`, `tarfile`, `tempfile`, `urllib`, `zipfile`, etc. |
 
 ### Outbound network calls
 
@@ -160,6 +162,8 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `https://github.com/<owner>/<repo>(.git)` | `git clone --depth 1` for pre-install scan of a GitHub URL | The `clone_repo` MCP tool |
 | `https://<host>/<path>.zip` | Download a `.zip` for pre-install scan | The `extract_zip` MCP tool — **https only**, refuses private / loopback / link-local / cloud-metadata hosts, re-validates every redirect target |
 | `https://raw.githubusercontent.com/rotoyang/tomofound/main/...` | Installer fetches its own source | `setup.sh` only |
+| `https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v3.5.0/LICENSE` | Re-verify ATR upstream license before trusting a catalog refresh | The `atr_update` MCP tool |
+| `https://github.com/Agent-Threat-Rule/agent-threat-rules/archive/refs/tags/v3.5.0.tar.gz` | Download the pinned ATR source tarball | The `atr_update` MCP tool — user-initiated only, never auto-run |
 
 ### Repository assets
 
@@ -180,5 +184,7 @@ tomofound's scanning pipeline integrates the following independent projects. Eac
 - **Trivy** — vulnerability and secret scanning, © [Aqua Security](https://github.com/aquasecurity/trivy), Apache-2.0. Auto-installed at first scan; binary lives at `~/.tomofound/tools/trivy`.
 - **OSV.dev** — open-source vulnerability database, © [Google](https://github.com/google/osv.dev), Apache-2.0. Queried live as a CVE-fallback source.
 - **Model Context Protocol Python SDK** — © [Anthropic, PBC](https://github.com/modelcontextprotocol/python-sdk), MIT. Provides the stdio MCP server runtime our `trivy_server.py` is built on.
+- **PyYAML** — © Kirill Simonov and contributors, MIT. Parses the Agent Threat Rules YAML catalog into our internal regex pre-filter.
+- **Agent Threat Rules (ATR)** — open detection rule format for AI-agent security threats, © [ATR Contributors](https://github.com/Agent-Threat-Rule/agent-threat-rules), MIT. Pinned to `v3.5.0`; consumed as a regex pre-filter by the `atr_match` MCP tool. Each ATR-sourced finding cites the upstream rule ID (`ATR-YYYY-NNNNN`) and the references the rule defines (OWASP Agentic Top 10, MITRE ATLAS, CVE) — see the rule index at https://github.com/Agent-Threat-Rule/agent-threat-rules/tree/v3.5.0/rules.
 
-When tomofound integrates additional rule or threat-intel catalogs (e.g. Agent Threat Rules, Bumblebee), each will be added to this list with its license, upstream URL, and the version we pin. See `docs/catalog-architecture.md` (local design notes) for the license-compliance protocol we follow before integrating any new source.
+When tomofound integrates additional rule or threat-intel catalogs (e.g. Bumblebee), each will be added to this list with its license, upstream URL, and the version we pin. See `docs/catalog-architecture.md` (local design notes) for the license-compliance protocol we follow before integrating any new source.
