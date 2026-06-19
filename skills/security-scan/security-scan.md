@@ -91,6 +91,20 @@ The tool returns JSON with:
 - `results`: Trivy JSON output, or `null` if skipped
 - `skipped_reason`: `"trivy_unavailable"` | `"no_dependency_info"` | `null`
 
+**Normalise Trivy output.** Trivy's `results` shape (`Results[].Vulnerabilities[]`,
+`Results[].Secrets[]`, etc.) is not the canonical finding shape used by `to_sarif`
+and the rest of the pipeline. Whenever `results` is non-null, call:
+
+```
+Call MCP tool: normalize_trivy
+  results: <the `results` field from scan_directory>
+```
+
+The tool returns `{ "findings": [...] }` where each finding has the standard
+`category` / `severity` / `file` / `line` / `description` / `snippet` / `detected_by: "Trivy"`
+keys. Add these directly to the per-item findings list — do not feed raw Trivy JSON
+into `to_sarif`.
+
 If `skipped_reason` is `"no_dependency_info"` (Level 5 — source code only), proceed to Level 4 fallback:
 read all source files, extract every import/require/from/use statement, collect unique
 third-party package names, then for each package:
@@ -545,11 +559,14 @@ These files exceeded the 1 MB read limit — only the first 1 MB was analyzed.
 If full coverage is needed, increase `FILE_READ_LIMIT` in `trivy_server.py`.
 ```
 
-7. If this was a pre-installation scan from a GitHub URL (you called `clone_repo`), clean up via the MCP tool:
+7. If this was a pre-installation scan from a GitHub URL **or a `.zip` archive** (you called
+   `clone_repo` *or* `extract_zip`), clean up via the MCP tool. Both tools return a
+   `cleanup_path` under `~/.tomofound/tools/` that must be removed once the scan
+   completes — otherwise the extracted attacker-controlled content accumulates:
 
 ```
 Call MCP tool: cleanup_clone
-  path: "<cleanup_path returned by clone_repo>"
+  path: "<cleanup_path returned by clone_repo or extract_zip>"
 ```
 
 8. Print a one-line summary to the user, leading with the overall risk score and badge:

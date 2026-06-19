@@ -19,7 +19,8 @@ def _bootstrap():
 if __name__ == "__main__":
     _bootstrap()
 
-import subprocess, json, shutil, platform, urllib.request, tempfile, re, zipfile
+import subprocess, json, shutil, platform, urllib.request, urllib.error, tempfile, re, zipfile, ipaddress, socket
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from python_analyzer import analyze_python  # noqa: E402
@@ -389,6 +390,50 @@ def clone_repo(url: str) -> dict:
         return {"error": str(e)}
 
 
+_SSRF_BLOCKED_HOSTNAMES = {"localhost", "metadata", "metadata.google.internal"}
+
+
+def _is_safe_remote_url(url: str) -> tuple[bool, str]:
+    """SSRF guard: allow only https:// to public, resolvable hosts."""
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        return False, f"unparseable URL: {e}"
+    if parsed.scheme != "https":
+        return False, "only https:// URLs are allowed"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False, "missing hostname"
+    if host in _SSRF_BLOCKED_HOSTNAMES:
+        return False, f"blocked hostname: {host}"
+    try:
+        addrs = socket.getaddrinfo(host, None)
+    except socket.gaierror as e:
+        return False, f"DNS resolution failed: {e}"
+    for fam, _, _, _, sockaddr in addrs:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except (ValueError, IndexError):
+            return False, f"unresolvable address: {sockaddr}"
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False, f"blocked address: {ip}"
+    return True, ""
+
+
+class _SsrfSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validates the target of every HTTP redirect before following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        ok, reason = _is_safe_remote_url(newurl)
+        if not ok:
+            raise urllib.error.URLError(f"unsafe redirect to {newurl!r}: {reason}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SSRF_SAFE_OPENER = urllib.request.build_opener(_SsrfSafeRedirectHandler())
+
+
 def _safe_extract_zip(zip_path: str, target_dir: str) -> dict | None:
     try:
         with zipfile.ZipFile(zip_path) as zf:
@@ -430,9 +475,13 @@ def extract_zip(source: str) -> dict:
             if not source.lower().split("?", 1)[0].endswith(".zip"):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return {"error": "URL must point to a .zip file"}
+            ok, reason = _is_safe_remote_url(source)
+            if not ok:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return {"error": f"URL rejected: {reason}"}
             zip_path = os.path.join(tmp_dir, "download.zip")
             try:
-                with urllib.request.urlopen(source, timeout=60) as resp:
+                with _SSRF_SAFE_OPENER.open(source, timeout=60) as resp:
                     written = 0
                     with open(zip_path, "wb") as out:
                         while True:
@@ -477,6 +526,75 @@ _SARIF_LEVEL = {
     "low": "note",
     "clean": "none",
 }
+
+
+_TRIVY_SEVERITY_NORMALISE = {
+    "CRITICAL": "critical",
+    "HIGH": "high",
+    "MEDIUM": "medium",
+    "LOW": "low",
+    "UNKNOWN": "low",
+}
+
+
+def normalize_trivy(results: dict) -> dict:
+    """Flatten raw Trivy `fs --format json` output into the canonical finding shape
+    used by to_sarif and the rest of the pipeline.
+
+    Accepts the dict returned by scan_directory (under `results`) and returns
+    `{"findings": [...]}`. Each finding has `category`, `severity`, `file`, `line`,
+    `description`, `snippet`, and `detected_by: "Trivy"`.
+    """
+    findings: list = []
+    if not isinstance(results, dict):
+        return {"findings": []}
+
+    for r in results.get("Results", []) or []:
+        target = r.get("Target") or ""
+
+        for v in r.get("Vulnerabilities", []) or []:
+            sev = _TRIVY_SEVERITY_NORMALISE.get(str(v.get("Severity") or "").upper(), "medium")
+            vid = v.get("VulnerabilityID") or "CVE-UNKNOWN"
+            pkg = v.get("PkgName") or ""
+            installed = v.get("InstalledVersion") or ""
+            title = v.get("Title") or v.get("Description") or ""
+            description = f"{vid} in {pkg}@{installed}".strip() + (f" — {title[:160]}" if title else "")
+            findings.append({
+                "category": "SUPPLY_CHAIN",
+                "severity": sev,
+                "file": target,
+                "line": v.get("Layer", {}).get("DiffID", 0) if isinstance(v.get("Layer"), dict) else 0,
+                "description": description,
+                "snippet": f"{pkg}@{installed}",
+                "detected_by": "Trivy",
+            })
+
+        for s in r.get("Secrets", []) or []:
+            sev = _TRIVY_SEVERITY_NORMALISE.get(str(s.get("Severity") or "").upper(), "high")
+            rule = s.get("RuleID") or s.get("Title") or "secret"
+            findings.append({
+                "category": "SECRET_LEAKAGE",
+                "severity": sev,
+                "file": target,
+                "line": s.get("StartLine") or 0,
+                "description": f"Trivy secret rule {rule}: {s.get('Title') or ''}".strip(),
+                "snippet": (s.get("Match") or "")[:200],
+                "detected_by": "Trivy",
+            })
+
+        for m in r.get("Misconfigurations", []) or []:
+            sev = _TRIVY_SEVERITY_NORMALISE.get(str(m.get("Severity") or "").upper(), "medium")
+            findings.append({
+                "category": "PERMISSION_ABUSE",
+                "severity": sev,
+                "file": target,
+                "line": (m.get("CauseMetadata") or {}).get("StartLine") or 0,
+                "description": f"{m.get('ID') or 'MISCONFIG'}: {m.get('Title') or m.get('Description') or ''}",
+                "snippet": (m.get("Resolution") or "")[:200],
+                "detected_by": "Trivy",
+            })
+
+    return {"findings": findings}
 
 
 def to_sarif(findings: list, scan_root: str | None = None) -> dict:
@@ -769,6 +887,20 @@ if Server is not None:
                     "required": ["findings"],
                 },
             ),
+            types.Tool(
+                name="normalize_trivy",
+                description="Convert raw Trivy `fs --format json` output (as returned by scan_directory.results) into the standard finding shape used by to_sarif and the rest of the pipeline. Returns {findings: [...]} with category, severity, file, line, description, snippet, detected_by='Trivy'.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "results": {
+                            "type": "object",
+                            "description": "Raw Trivy JSON output (the `results` field from scan_directory's return).",
+                        },
+                    },
+                    "required": ["results"],
+                },
+            ),
         ]
 
     @_server.call_tool()
@@ -867,6 +999,10 @@ if Server is not None:
                 findings=arguments.get("findings", []),
                 scan_root=arguments.get("scan_root"),
             )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "normalize_trivy":
+            result = normalize_trivy(results=arguments.get("results") or {})
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")

@@ -258,3 +258,92 @@ def test_oversized_file_skipped(tmp_path, monkeypatch):
     r = analyze_python(str(p))
     assert r["files_analyzed"] == 0
     assert any("exceeds" in s["reason"] for s in r["skipped"])
+
+
+# --- Taint analyzer regression tests for code-review fixes ---
+
+def _taint_findings(tmp_path, src):
+    p = _write(tmp_path, "a.py", src)
+    r = analyze_python(p)
+    return [f for f in r["findings"] if f["detected_by"] == "TAINT"]
+
+
+def test_taint_does_not_leak_into_nested_function(tmp_path):
+    # Outer taints x via os.environ, but inner function's `x` is a fresh parameter.
+    # Outer's visitor must NOT descend into inner's body.
+    findings = _taint_findings(tmp_path, """
+        import os
+        def outer():
+            x = os.environ['BAD']
+            def inner(x):
+                eval(x)
+            return inner
+    """)
+    assert findings == [], f"taint leaked into nested function: {findings}"
+
+
+def test_taint_cleared_on_safe_reassignment(tmp_path):
+    # x = input() taints x; then x = 'safe' must clear that taint.
+    findings = _taint_findings(tmp_path, """
+        def f():
+            x = input()
+            x = 'hardcoded literal'
+            eval(x)
+    """)
+    assert findings == [], f"taint not cleared on safe reassign: {findings}"
+
+
+def test_taint_not_propagated_through_int_wrapper(tmp_path):
+    # int(tainted) yields an int — cannot carry injection payload.
+    findings = _taint_findings(tmp_path, """
+        def f():
+            n = int(input())
+            eval(str(n))
+    """)
+    assert findings == [], f"int() wrapper propagated taint: {findings}"
+
+
+def test_taint_not_propagated_through_len_wrapper(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f():
+            n = len(input())
+            eval(str(n))
+    """)
+    assert findings == []
+
+
+def test_taint_propagates_through_annotated_assignment(tmp_path):
+    # cmd: str = arguments['cmd'] is AnnAssign, not Assign — must still taint cmd.
+    findings = _taint_findings(tmp_path, """
+        from mcp.server import Server
+        s = Server('x')
+        @s.call_tool()
+        async def h(name, arguments):
+            cmd: str = arguments['cmd']
+            eval(cmd)
+    """)
+    assert any("eval" in f["description"] for f in findings), \
+        f"AnnAssign taint missed: {findings}"
+
+
+def test_taint_propagates_through_augassign(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        import os
+        def f():
+            cmd = 'echo '
+            cmd += os.environ['X']
+            os.system(cmd)
+    """)
+    assert any("os.system" in f["description"] for f in findings), \
+        f"AugAssign taint missed: {findings}"
+
+
+def test_taint_still_catches_real_envvar_to_eval(tmp_path):
+    # Regression-of-regression: the genuine pattern must still fire.
+    findings = _taint_findings(tmp_path, """
+        import os
+        def f():
+            x = os.environ['CMD']
+            eval(x)
+    """)
+    assert any("eval" in f["description"] for f in findings)

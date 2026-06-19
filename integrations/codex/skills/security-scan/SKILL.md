@@ -18,10 +18,14 @@ Use the Tomofound MCP server to perform a structured security review of AI-tool 
 2. Use Tomofound MCP tools first:
    - `discover_targets` to inventory installed targets or a supplied local path.
    - `clone_repo` and `cleanup_clone` for public GitHub pre-install scans.
+   - `extract_zip` for `.zip` pre-install scans (local path or `https://…zip` URL). Use `cleanup_clone` to remove its temp directory once done — both tools share the cleanup contract.
    - `scan_directory` for Trivy-backed CVE and secret checks.
+   - `normalize_trivy` to convert raw `scan_directory.results` into the canonical finding shape (category/severity/file/line) consumed by `to_sarif` and the rest of the pipeline. Always call this when `results` is non-null.
+   - `analyze_python` for AST + lightweight taint analysis of Python sources — pass a `.py` file or a directory; flags `eval`/`exec`/`pickle.loads`/`subprocess(shell=True)`/dynamic getattr and reports when env vars, `sys.argv`, `input()`, network responses, or MCP-handler arguments reach a code-execution or shell sink.
    - `read_file` for semantic review of code, prompts, skills, MCP configs, and config metadata.
    - `check_osv` only as a fallback when Trivy has no dependency version data.
-   - `write_file` when saving a report under `~/.tomofound/reports/`.
+   - `to_sarif` to render the merged canonical findings as SARIF 2.1.0 for CI upload alongside the markdown report.
+   - `write_file` when saving a report under `~/.tomofound/reports/` (write a markdown summary, a raw-findings JSON, and the SARIF document with a shared `YYYY-MM-DD-HH-MM` timestamp).
 3. Inventory files by role:
    - Code: `.ts`, `.js`, `.mjs`, `.cjs`, `.py`, `.go`, `.rs`, `.sh`, `.bash`, `.zsh`.
    - Manifests and locks: `package.json`, lockfiles, `requirements.txt`, `pyproject.toml`, `go.mod`, `Cargo.toml`.

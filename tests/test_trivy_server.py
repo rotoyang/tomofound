@@ -642,3 +642,150 @@ def test_to_sarif_with_scan_root():
     doc = to_sarif([{"category": "X", "severity": "low", "description": "d"}],
                    scan_root="/tmp/scan")
     assert doc["runs"][0]["originalUriBaseIds"]["SRCROOT"]["uri"] == "/tmp/scan"
+
+
+# --- SSRF defense for extract_zip ---
+
+from server.trivy_server import _is_safe_remote_url, normalize_trivy
+
+
+def test_safe_url_rejects_http_scheme():
+    ok, reason = _is_safe_remote_url("http://example.com/x.zip")
+    assert not ok and "https" in reason
+
+
+def test_safe_url_rejects_localhost_name():
+    ok, reason = _is_safe_remote_url("https://localhost/x.zip")
+    assert not ok and "localhost" in reason
+
+
+def test_safe_url_rejects_loopback_literal():
+    ok, reason = _is_safe_remote_url("https://127.0.0.1/x.zip")
+    assert not ok and "127.0.0.1" in reason
+
+
+def test_safe_url_rejects_link_local_metadata():
+    ok, reason = _is_safe_remote_url("https://169.254.169.254/x.zip")
+    assert not ok
+
+
+def test_safe_url_rejects_private_rfc1918():
+    ok, reason = _is_safe_remote_url("https://10.0.0.1/x.zip")
+    assert not ok
+
+
+def test_safe_url_rejects_cloud_metadata_hostname():
+    ok, reason = _is_safe_remote_url("https://metadata.google.internal/x.zip")
+    assert not ok and "metadata" in reason
+
+
+def test_safe_url_allows_public_https():
+    ok, reason = _is_safe_remote_url("https://github.com/foo/bar.zip")
+    assert ok, reason
+
+
+def test_extract_zip_blocks_http_url(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    result = extract_zip("http://example.com/x.zip")
+    assert "error" in result and "https" in result["error"]
+
+
+def test_extract_zip_blocks_loopback_url(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path / "tools"))
+    result = extract_zip("https://127.0.0.1/x.zip")
+    assert "error" in result and "127.0.0.1" in result["error"]
+
+
+# --- normalize_trivy ---
+
+def test_normalize_trivy_vulnerability():
+    raw = {"Results": [{
+        "Target": "package-lock.json",
+        "Vulnerabilities": [{
+            "VulnerabilityID": "CVE-2024-1234",
+            "PkgName": "lodash",
+            "InstalledVersion": "4.17.20",
+            "Severity": "HIGH",
+            "Title": "Prototype pollution",
+        }],
+    }]}
+    out = normalize_trivy(raw)
+    assert len(out["findings"]) == 1
+    f = out["findings"][0]
+    assert f["category"] == "SUPPLY_CHAIN"
+    assert f["severity"] == "high"
+    assert f["file"] == "package-lock.json"
+    assert "CVE-2024-1234" in f["description"]
+    assert "lodash" in f["description"]
+    assert f["detected_by"] == "Trivy"
+
+
+def test_normalize_trivy_secret():
+    raw = {"Results": [{
+        "Target": "config.py",
+        "Secrets": [{
+            "RuleID": "aws-access-key-id",
+            "Title": "AWS access key",
+            "Severity": "CRITICAL",
+            "StartLine": 42,
+            "Match": "AKIA1234567890ABCDEF",
+        }],
+    }]}
+    out = normalize_trivy(raw)
+    assert out["findings"][0]["category"] == "SECRET_LEAKAGE"
+    assert out["findings"][0]["severity"] == "critical"
+    assert out["findings"][0]["line"] == 42
+
+
+def test_normalize_trivy_misconfiguration():
+    raw = {"Results": [{
+        "Target": "Dockerfile",
+        "Misconfigurations": [{
+            "ID": "DS002",
+            "Title": "running as root",
+            "Severity": "MEDIUM",
+            "CauseMetadata": {"StartLine": 5},
+        }],
+    }]}
+    out = normalize_trivy(raw)
+    assert out["findings"][0]["category"] == "PERMISSION_ABUSE"
+    assert out["findings"][0]["line"] == 5
+
+
+def test_normalize_trivy_empty():
+    assert normalize_trivy({})["findings"] == []
+    assert normalize_trivy(None)["findings"] == []
+
+
+def test_normalize_trivy_unknown_severity_defaults():
+    raw = {"Results": [{
+        "Target": "x",
+        "Vulnerabilities": [{
+            "VulnerabilityID": "CVE-X",
+            "PkgName": "p",
+            "InstalledVersion": "1",
+            "Severity": "WAT",  # not in mapping
+        }],
+    }]}
+    out = normalize_trivy(raw)
+    assert out["findings"][0]["severity"] == "medium"
+
+
+def test_normalize_trivy_into_to_sarif():
+    raw = {"Results": [{
+        "Target": "package-lock.json",
+        "Vulnerabilities": [{
+            "VulnerabilityID": "CVE-1",
+            "PkgName": "lodash",
+            "InstalledVersion": "1",
+            "Severity": "HIGH",
+        }],
+    }]}
+    findings = normalize_trivy(raw)["findings"]
+    doc = to_sarif(findings)
+    rules = doc["runs"][0]["tool"]["driver"]["rules"]
+    assert any(r["id"] == "SUPPLY_CHAIN" for r in rules)
+    res = doc["runs"][0]["results"][0]
+    assert res["ruleId"] == "SUPPLY_CHAIN"
+    assert res["level"] == "error"
+    assert res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "package-lock.json"
