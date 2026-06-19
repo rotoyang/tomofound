@@ -54,6 +54,16 @@ _TAINT_SOURCE_CALLS = {
 
 _TAINT_SOURCE_BUILTINS = {"input"}
 
+# Type-narrowing / value-extracting builtins. Their result cannot be used to inject code
+# even when the argument is tainted (int('foo') raises, len(x) is an int, etc.), so we
+# stop taint propagation here to avoid drowning real findings in noise.
+_TAINT_SAFE_WRAPPERS = {
+    "int", "float", "bool", "complex",
+    "len", "hash", "id", "abs", "ord", "round",
+    "bin", "hex", "oct",
+    "isinstance", "issubclass", "type",
+}
+
 _MCP_DECORATOR_ATTRS = {"call_tool", "list_tools", "list_prompts", "get_prompt", "list_resources"}
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", "out"}
@@ -188,6 +198,9 @@ def _is_mcp_handler(func_def) -> bool:
     return False
 
 
+_NESTED_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
 class _TaintVisitor:
     def __init__(self, path: str, lines: list, function):
         self.path = path
@@ -214,17 +227,51 @@ class _TaintVisitor:
             for a in self.function.args.kwonlyargs:
                 self.tainted.add(a.arg)
 
-        for stmt in ast.walk(self.function):
-            if isinstance(stmt, ast.Assign):
-                self._handle_assign(stmt)
-            elif isinstance(stmt, ast.Call):
-                self._check_sink(stmt)
+        for node in self._scope_nodes(self.function):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                self._handle_assign(node)
+            elif isinstance(node, ast.Call):
+                self._check_sink(node)
 
-    def _handle_assign(self, node: ast.Assign):
-        if self._is_tainted(node.value):
-            for tgt in node.targets:
-                if isinstance(tgt, ast.Name):
+    def _scope_nodes(self, root):
+        """DFS pre-order over `root`'s subtree that does NOT descend into nested
+        function or lambda definitions. Statements appear in textual order so a
+        tainting assignment is observed before a subsequent sink call."""
+        for child in ast.iter_child_nodes(root):
+            yield from self._descend(child)
+
+    def _descend(self, node):
+        yield node
+        if isinstance(node, _NESTED_SCOPE_NODES):
+            return
+        for child in ast.iter_child_nodes(node):
+            yield from self._descend(child)
+
+    def _handle_assign(self, node):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            if node.value is None:  # bare annotation, no taint change
+                return
+            targets = [node.target]
+            value = node.value
+        elif isinstance(node, ast.AugAssign):
+            # x += y leaves x tainted if old x was tainted or y is tainted; can't untaint.
+            if self._is_tainted(node.value) and isinstance(node.target, ast.Name):
+                self.tainted.add(node.target.id)
+            return
+        else:
+            return
+
+        value_is_tainted = self._is_tainted(value)
+        for tgt in targets:
+            if isinstance(tgt, ast.Name):
+                if value_is_tainted:
                     self.tainted.add(tgt.id)
+                else:
+                    # Safe reassignment clears taint.
+                    self.tainted.discard(tgt.id)
 
     def _check_sink(self, node: ast.Call):
         func = node.func
@@ -254,6 +301,10 @@ class _TaintVisitor:
             return self._is_tainted(node.value)
         if isinstance(node, ast.Call):
             func = node.func
+            # Type-narrowing wrappers (int, len, bool, ...) yield values that can't
+            # be used to inject code, so don't propagate taint through them.
+            if isinstance(func, ast.Name) and func.id in _TAINT_SAFE_WRAPPERS:
+                return False
             if isinstance(func, ast.Name) and func.id in _TAINT_SOURCE_BUILTINS:
                 return True
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
