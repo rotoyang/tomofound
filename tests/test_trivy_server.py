@@ -789,3 +789,95 @@ def test_normalize_trivy_into_to_sarif():
     assert res["ruleId"] == "SUPPLY_CHAIN"
     assert res["level"] == "error"
     assert res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "package-lock.json"
+
+
+# --- catalogs_status ----------------------------------------------------
+
+from server.trivy_server import catalogs_status, _osv_status, _atr_status, _trivy_status
+
+
+def test_osv_status_static_descriptor():
+    s = _osv_status()
+    assert s["source"] == "osv"
+    assert s["mode"] == "live_api"
+    assert s["available"] is True
+    assert "google" in s["attribution"].lower()
+    assert s["endpoint"].startswith("https://")
+
+
+def test_atr_status_returns_unavailable_when_uncached(tmp_path, monkeypatch):
+    # trivy_server imports atr_catalog as a top-level module (via sys.path
+    # injection in trivy_server.py), so we patch through `server.trivy_server.atr_catalog`
+    # to hit the same instance the production code calls.
+    import server.trivy_server as ts
+    monkeypatch.setattr(ts.atr_catalog, "META_PATH", str(tmp_path / "nonexistent.json"))
+    s = _atr_status()
+    assert s["source"] == "atr"
+    assert s["available"] is False
+    assert "atr_update" in s["hint"]
+    assert s["pin"] == ts.atr_catalog.ATR_PIN
+    assert s["license"] == "MIT"
+
+
+def test_atr_status_surfaces_cached_metadata(tmp_path, monkeypatch):
+    import server.trivy_server as ts
+    meta = {
+        "version": "v3.5.0",
+        "rules_compiled": 5,
+        "categories": ["prompt-injection"],
+        "license": "MIT",
+        "attribution": "ATR",
+    }
+    meta_path = tmp_path / "meta.json"
+    meta_path.write_text(json.dumps(meta))
+    monkeypatch.setattr(ts.atr_catalog, "META_PATH", str(meta_path))
+    s = _atr_status()
+    assert s["available"] is True
+    assert s["version"] == "v3.5.0"
+    assert s["rules_compiled"] == 5
+    assert "hint" not in s  # only present when unavailable
+
+
+def test_trivy_status_when_binary_missing(monkeypatch):
+    monkeypatch.setattr("server.trivy_server.shutil.which", lambda _: None)
+    monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", "/nonexistent/trivy")
+    s = _trivy_status()
+    assert s["source"] == "trivy"
+    assert s["available"] is False
+    assert "Trivy not installed" in s["reason"]
+    assert s["license"] == "Apache-2.0"
+
+
+def test_trivy_status_parses_version_output(monkeypatch, tmp_path):
+    fake_trivy = tmp_path / "trivy"
+    fake_trivy.write_text("#!/bin/sh\nexit 0\n")
+    fake_trivy.chmod(0o755)
+    monkeypatch.setattr("server.trivy_server.shutil.which", lambda _: str(fake_trivy))
+
+    class _FakeCompleted:
+        stdout = (
+            "Version: 0.59.1\n"
+            "Vulnerability DB:\n"
+            "  Version: 2\n"
+            "  UpdatedAt: 2026-06-19 06:18:08.123 +0000 UTC\n"
+        )
+        stderr = ""
+    monkeypatch.setattr("server.trivy_server.subprocess.run",
+                        lambda *a, **k: _FakeCompleted())
+    s = _trivy_status()
+    assert s["available"] is True
+    assert s["binary_version"] == "0.59.1"
+    assert "2026-06-19" in s["db_updated_at"]
+
+
+def test_catalogs_status_includes_all_three_sources(monkeypatch):
+    monkeypatch.setattr("server.trivy_server.shutil.which", lambda _: None)
+    monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", "/nonexistent/trivy")
+    result = catalogs_status()
+    sources = [c["source"] for c in result["catalogs"]]
+    assert sources == ["atr", "osv", "trivy"]
+    # Every entry must carry an availability flag so renderers can branch
+    for c in result["catalogs"]:
+        assert "available" in c
+        assert "name" in c
+        assert "mode" in c
