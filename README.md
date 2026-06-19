@@ -133,4 +133,4 @@ Each scan writes three files under `~/.tomofound/reports/`, sharing a `YYYY-MM-D
 |------|--------|-----|
 | `*.md` | Markdown | Human-readable report (primary) |
 | `*.json` | JSON | Structured raw findings, score, and counts |
-| `*.sarif` | SARIF 2.1.0 | CI/CD upload (GitHub code scanning, Azure DevOps, GitLab) |
+| `*.sarif` | SARIF 2.1.0 | CI/CD upload (GitHub code scanning, Azure DevOps, GitLab) — Trivy CVEs, secrets, and misconfigurations are normalised into the same finding shape as AST / taint / LLM findings, so every result has a rule ID and file location |
