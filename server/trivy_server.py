@@ -633,6 +633,108 @@ def normalize_trivy(results: dict) -> dict:
     return {"findings": findings}
 
 
+# --- Catalog freshness aggregation ----------------------------------------
+# `catalogs_status` is the single canonical source of "which threat-intel and
+# rule catalogs is this scan consulting, and how fresh is each?" that the
+# skill renders into every report header. Adapters added in future (e.g.
+# Bumblebee) should plug in here so the user always sees one consolidated
+# block at the top of the report.
+
+_TRIVY_VERSION_RE = re.compile(r"^Version:\s*(\S+)", re.M)
+_TRIVY_DB_UPDATED_RE = re.compile(r"UpdatedAt:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9:.]+)")
+
+
+def _trivy_status() -> dict:
+    """Inspect the locally-installed Trivy binary (if any). Read-only — does
+    not auto-install. Never blocks on network."""
+    trivy_bin = shutil.which("trivy")
+    if not trivy_bin and os.path.exists(TOOLS_TRIVY):
+        trivy_bin = TOOLS_TRIVY
+    if not trivy_bin:
+        return {
+            "source": "trivy",
+            "name": "Trivy CVE / secret scanner",
+            "mode": "managed_binary",
+            "available": False,
+            "license": "Apache-2.0",
+            "license_url": "https://github.com/aquasecurity/trivy/blob/main/LICENSE",
+            "reason": "Trivy not installed — will be auto-installed on first scan_directory call",
+        }
+    info: dict = {
+        "source": "trivy",
+        "name": "Trivy CVE / secret scanner",
+        "mode": "managed_binary",
+        "available": True,
+        "binary_path": trivy_bin,
+        "license": "Apache-2.0",
+        "license_url": "https://github.com/aquasecurity/trivy/blob/main/LICENSE",
+        "attribution": "© Aqua Security, Apache-2.0",
+        "note": "self-updating CVE / secret database — no manual refresh needed",
+    }
+    try:
+        proc = subprocess.run([trivy_bin, "--version"], capture_output=True, text=True, timeout=10)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        m = _TRIVY_VERSION_RE.search(out)
+        if m:
+            info["binary_version"] = m.group(1)
+        m = _TRIVY_DB_UPDATED_RE.search(out)
+        if m:
+            info["db_updated_at"] = m.group(1)
+    except Exception as e:
+        info["version_probe_error"] = str(e)
+    return info
+
+
+def _osv_status() -> dict:
+    """OSV.dev is a live HTTPS API — there's nothing to cache locally. We
+    return a static descriptor for the report header."""
+    return {
+        "source": "osv",
+        "name": "OSV.dev vulnerability database",
+        "mode": "live_api",
+        "available": True,
+        "endpoint": "https://api.osv.dev/v1/query",
+        "license": "Apache-2.0 (engine); upstream advisory licenses per entry",
+        "license_url": "https://github.com/google/osv.dev/blob/master/LICENSE",
+        "attribution": "© Google, Apache-2.0",
+        "note": "queried live by check_osv; degrades silently if the API is unreachable",
+    }
+
+
+def _atr_status() -> dict:
+    """Wrap atr_catalog.catalog_status() with the canonical descriptor shape
+    expected by catalogs_status consumers."""
+    base = atr_catalog.catalog_status()
+    descriptor = {
+        "source": "atr",
+        "name": "Agent Threat Rules (ATR)",
+        "mode": "local_catalog",
+        "pin": atr_catalog.ATR_PIN,
+        "license": atr_catalog.LICENSE,
+        "license_url": atr_catalog.LICENSE_URL,
+        "attribution": atr_catalog.ATTRIBUTION,
+    }
+    descriptor.update(base)
+    if not base.get("available"):
+        descriptor.setdefault("hint", "run atr_update to populate the catalog")
+    return descriptor
+
+
+def catalogs_status() -> dict:
+    """Aggregated freshness status for every catalog / source that contributes
+    to scan findings. Used by report headers. Never blocks on network: each
+    sub-probe is local-only (file reads, locally-installed binary version
+    probe) — the only thing that runs an external HTTP call is the user-
+    initiated atr_update."""
+    return {
+        "catalogs": [
+            _atr_status(),
+            _osv_status(),
+            _trivy_status(),
+        ],
+    }
+
+
 def to_sarif(findings: list, scan_root: str | None = None) -> dict:
     rules: dict[str, dict] = {}
     results = []
@@ -965,6 +1067,11 @@ if Server is not None:
                 description="Read-only check of the local ATR catalog state: version, rule count, license, attribution string. Used by report headers and the user-facing freshness display. Never blocks on network.",
                 inputSchema={"type": "object", "properties": {}},
             ),
+            types.Tool(
+                name="catalogs_status",
+                description="Aggregated freshness status for every catalog / source the scanner consults — ATR (local), OSV (live API), Trivy (managed binary). Returns {catalogs: [{source, name, mode, available, version?, license, attribution, ...}, ...]}. The skill renders this into every scan report's header so the user can see at a glance what catalogs were used, what version, and what license. Never blocks on network — each probe is local-only.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
         ]
 
     @_server.call_tool()
@@ -1082,6 +1189,10 @@ if Server is not None:
 
         if name == "atr_status":
             result = atr_catalog.catalog_status()
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "catalogs_status":
+            result = catalogs_status()
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")
