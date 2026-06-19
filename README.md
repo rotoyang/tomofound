@@ -141,13 +141,14 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 
 ### Runtime dependencies
 
-| Component | Version | Source | Notes |
-|-----------|---------|--------|-------|
-| Python `mcp` SDK | `1.28.0` (exact pin) | https://pypi.org/project/mcp/ | Installed into `~/.tomofound/venv` on first server start by `_bootstrap()` (see `server/trivy_server.py`). Bump the `_MCP_PIN` constant + this table together. |
-| Trivy CLI | auto-installed *latest stable* | https://github.com/aquasecurity/trivy | Resolved via `https://api.github.com/repos/aquasecurity/trivy/releases/latest` on first scan, then cached at `~/.tomofound/tools/trivy`. Not pinned — Trivy ships CVE database auto-updates anyway, so pinning the binary alone wouldn't make the scan reproducible. |
-| host Python 3 | `≥3.9` | macOS system | Required for the bootstrap venv. Preinstalled on macOS. |
-| host `git` | any recent | macOS system | Required only when scanning a `https://github.com/...` URL via `clone_repo`. |
-| Python stdlib | (whatever the host Python ships) | https://docs.python.org/3/library/ | `ast`, `ipaddress`, `socket`, `subprocess`, `tempfile`, `urllib`, `zipfile`, etc. |
+| Component | Version | License | Source | Notes |
+|-----------|---------|---------|--------|-------|
+| Python `mcp` SDK | `1.28.0` (exact pin) | [MIT](https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE) | https://pypi.org/project/mcp/ | Installed into `~/.tomofound/venv` on first server start by `_bootstrap()` (see `server/trivy_server.py`). Bump the `_MCP_PIN` constant + this table together. |
+| Trivy CLI | auto-installed *latest stable* | [Apache-2.0](https://github.com/aquasecurity/trivy/blob/main/LICENSE) | https://github.com/aquasecurity/trivy | Resolved via `https://api.github.com/repos/aquasecurity/trivy/releases/latest` on first scan, then cached at `~/.tomofound/tools/trivy`. Not pinned — Trivy ships CVE database auto-updates anyway, so pinning the binary alone wouldn't make the scan reproducible. |
+| OSV vulnerability API | API v1 (live) | [Apache-2.0](https://github.com/google/osv.dev/blob/master/LICENSE) (engine); upstream advisory licenses for individual entries | https://osv.dev | Queried by the `check_osv` MCP tool as a fallback when Trivy has no dependency manifest. Findings cite the OSV advisory ID. |
+| host Python 3 | `≥3.9` | [PSF License](https://docs.python.org/3/license.html) | macOS system | Required for the bootstrap venv. Preinstalled on macOS. |
+| host `git` | any recent | [GPL-2.0](https://git-scm.com/about/free-and-open-source) | macOS system | Required only when scanning a `https://github.com/...` URL via `clone_repo`. Used as a CLI subprocess; we do not link git as a library. |
+| Python stdlib | ships with host Python | [PSF License](https://docs.python.org/3/license.html) | https://docs.python.org/3/library/ | `ast`, `ipaddress`, `socket`, `subprocess`, `tempfile`, `urllib`, `zipfile`, etc. |
 
 ### Outbound network calls
 
@@ -171,3 +172,13 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `setup.sh` | This repo | One-shot installer |
 
 No third-party Python wheels are vendored, no binary blobs ship in the repo, and the installer touches only `~/.tomofound/`, `~/Library/Application Support/Claude/claude_desktop_config.json`, and (if Codex is selected) `~/.codex/config.toml` + `~/.codex/skills/security-scan/`.
+
+### Attribution
+
+tomofound's scanning pipeline integrates the following independent projects. Each runs under its own license listed above — we use them as documented, attribute them in scan reports, and do not redistribute their data.
+
+- **Trivy** — vulnerability and secret scanning, © [Aqua Security](https://github.com/aquasecurity/trivy), Apache-2.0. Auto-installed at first scan; binary lives at `~/.tomofound/tools/trivy`.
+- **OSV.dev** — open-source vulnerability database, © [Google](https://github.com/google/osv.dev), Apache-2.0. Queried live as a CVE-fallback source.
+- **Model Context Protocol Python SDK** — © [Anthropic, PBC](https://github.com/modelcontextprotocol/python-sdk), MIT. Provides the stdio MCP server runtime our `trivy_server.py` is built on.
+
+When tomofound integrates additional rule or threat-intel catalogs (e.g. Agent Threat Rules, Bumblebee), each will be added to this list with its license, upstream URL, and the version we pin. See `docs/catalog-architecture.md` (local design notes) for the license-compliance protocol we follow before integrating any new source.
