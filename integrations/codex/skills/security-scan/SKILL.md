@@ -26,6 +26,7 @@ Use the Tomofound MCP server to perform a structured security review of AI-tool 
    - `check_osv` only as a fallback when Trivy has no dependency version data.
    - `atr_update`, `atr_match`, `atr_status` for the Agent Threat Rules regex pre-filter (community-maintained YAML rule catalog for AI-agent threats; pinned v3.5.0, MIT). `atr_update` is user-initiated only — never auto-run; `atr_match` matches a target's content against the cached catalog; `atr_status` checks freshness.
    - `catalogs_status` to read the aggregated freshness state of every catalog the scanner consults (ATR, OSV, Trivy). Render this at the top of every scan report so the user can see which catalogs were used, what version, and what license.
+   - `compute_risk_score` to deterministically derive the 0-100 score, recommendation, and badge from the merged canonical findings. Always use this for the report header — do not sum severity weights by hand or the score will drift between runs.
    - `to_sarif` to render the merged canonical findings as SARIF 2.1.0 for CI upload alongside the markdown report.
    - `write_file` when saving a report under `~/.tomofound/reports/` (write a markdown summary, a raw-findings JSON, and the SARIF document with a shared `YYYY-MM-DD-HH-MM` timestamp).
 3. Inventory files by role:

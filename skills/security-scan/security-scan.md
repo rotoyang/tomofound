@@ -472,13 +472,23 @@ After all analyses are complete:
    - Merge Trivy findings (if available) with LLM findings
    - Deduplicate: if Trivy and LLM report the same issue in the same file, keep one entry and note both sources
    - Overall item risk = highest severity finding for that item
-   - Per-item risk score: sum severity weights, cap at 100
-     `critical=25, high=10, medium=3, low=1`
+   - Per-item risk score: call `compute_risk_score` with that item's findings only.
+     Same weights as the overall scan (`critical=25, high=10, medium=3, low=1`, cap 100).
 
 2. Sort items: critical first, then high, medium, low, clean
 
-3. Compute the **overall risk score** for the whole scan: sum severity weights across
-   every finding from every item, cap at 100. Map to an install recommendation:
+3. Compute the **overall risk score** for the whole scan by calling:
+
+   ```
+   Call MCP tool: compute_risk_score
+   Arguments: { "findings": [<every finding from every item>] }
+   ```
+
+   The tool returns `{score, raw_score, capped, recommendation, badge, description, counts, weights}`.
+   Use `score`/`badge`/`description` verbatim in the report header — do NOT recompute by hand,
+   otherwise the score will drift between runs.
+
+   Recommendation bands (for reference; the tool emits the right one):
 
    | Score | Recommendation | Badge |
    |-------|----------------|-------|
@@ -649,7 +659,8 @@ To add a detection rule, edit the relevant prompt section in this file:
 - New config check → add a bullet in **Prompt C**
 - New MCP server-launch / URL check → add a bullet in **Prompt D**
 
-To change scoring weights or recommendation thresholds, edit the table in
-**Step 4 — Aggregate and render report**.
+To change scoring weights or recommendation thresholds, edit `_SEVERITY_WEIGHTS`
+and `_RECOMMENDATION_TABLE` in `server/trivy_server.py` — that's the single source
+of truth used by the `compute_risk_score` MCP tool.
 
 No code changes required.

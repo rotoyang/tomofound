@@ -869,6 +869,56 @@ def to_sarif(findings: list, scan_root: str | None = None) -> dict:
     }
 
 
+_SEVERITY_WEIGHTS = {"critical": 25, "high": 10, "medium": 3, "low": 1}
+
+_RECOMMENDATION_TABLE = [
+    (0, 0, "SAFE", "✅ SAFE", "no findings"),
+    (1, 15, "CAUTION", "🔵 CAUTION",
+     "review findings before relying on these extensions"),
+    (16, 50, "HIGH_RISK", "⚠️ HIGH RISK",
+     "fix or remove flagged items before further use"),
+    (51, 100, "AVOID", "🚫 AVOID",
+     "do not install, or uninstall immediately"),
+]
+
+
+def compute_risk_score(findings: list) -> dict:
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    raw_score = 0
+    for f in findings or []:
+        sev = str((f or {}).get("severity") or "").lower()
+        if sev not in counts:
+            continue
+        counts[sev] += 1
+        raw_score += _SEVERITY_WEIGHTS[sev]
+
+    score = min(raw_score, 100)
+    capped = raw_score > 100
+
+    recommendation = "SAFE"
+    badge = "✅ SAFE"
+    description = "no findings"
+    for lo, hi, rec, bdg, desc in _RECOMMENDATION_TABLE:
+        if lo <= score <= hi:
+            recommendation = rec
+            badge = bdg
+            description = desc
+            break
+
+    counts["total"] = sum(counts[k] for k in ("critical", "high", "medium", "low"))
+
+    return {
+        "score": score,
+        "raw_score": raw_score,
+        "capped": capped,
+        "recommendation": recommendation,
+        "badge": badge,
+        "description": description,
+        "counts": counts,
+        "weights": dict(_SEVERITY_WEIGHTS),
+    }
+
+
 def _load_prompt_source() -> str:
     for candidate in _PROMPT_SOURCE_CANDIDATES:
         if os.path.isfile(candidate):
@@ -1150,6 +1200,21 @@ if Server is not None:
                 description="Aggregated freshness status for every catalog / source the scanner consults — ATR (local), OSV (live API), Trivy (managed binary). Returns {catalogs: [{source, name, mode, available, version?, license, attribution, ...}, ...]}. The skill renders this into every scan report's header so the user can see at a glance what catalogs were used, what version, and what license. Never blocks on network — each probe is local-only.",
                 inputSchema={"type": "object", "properties": {}},
             ),
+            types.Tool(
+                name="compute_risk_score",
+                description="Deterministically compute the 0-100 risk score and install recommendation from a list of findings. Severity weights: critical=25, high=10, medium=3, low=1, capped at 100. Recommendation bands: 0=SAFE, 1-15=CAUTION, 16-50=HIGH_RISK, 51-100=AVOID. Returns {score, raw_score, capped, recommendation, badge, description, counts:{critical,high,medium,low,total}, weights}. Use this instead of summing weights by hand so the score never drifts between runs.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "findings": {
+                            "type": "array",
+                            "description": "List of findings (canonical shape). Each must have a `severity` field of critical|high|medium|low; unknown severities are ignored.",
+                            "items": {"type": "object"},
+                        },
+                    },
+                    "required": ["findings"],
+                },
+            ),
         ]
 
     @_server.call_tool()
@@ -1271,6 +1336,10 @@ if Server is not None:
 
         if name == "catalogs_status":
             result = catalogs_status()
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "compute_risk_score":
+            result = compute_risk_score(findings=arguments.get("findings") or [])
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")

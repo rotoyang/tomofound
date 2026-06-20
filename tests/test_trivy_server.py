@@ -1031,3 +1031,121 @@ def test_catalogs_status_includes_all_three_sources(monkeypatch):
         assert "available" in c
         assert "name" in c
         assert "mode" in c
+
+
+from server.trivy_server import compute_risk_score
+
+
+def test_compute_risk_score_empty_findings_is_safe():
+    r = compute_risk_score([])
+    assert r["score"] == 0
+    assert r["raw_score"] == 0
+    assert r["capped"] is False
+    assert r["recommendation"] == "SAFE"
+    assert r["badge"] == "✅ SAFE"
+    assert r["counts"] == {"critical": 0, "high": 0, "medium": 0, "low": 0, "total": 0}
+
+
+def test_compute_risk_score_caution_band():
+    r = compute_risk_score([{"severity": "low"}, {"severity": "medium"}])
+    assert r["raw_score"] == 4  # 1 + 3
+    assert r["score"] == 4
+    assert r["recommendation"] == "CAUTION"
+    assert r["badge"] == "🔵 CAUTION"
+
+
+def test_compute_risk_score_high_risk_band():
+    # 2 high + 1 medium = 23 → 16-50 band
+    r = compute_risk_score([
+        {"severity": "high"}, {"severity": "high"}, {"severity": "medium"}
+    ])
+    assert r["raw_score"] == 23
+    assert r["score"] == 23
+    assert r["recommendation"] == "HIGH_RISK"
+    assert r["badge"] == "⚠️ HIGH RISK"
+
+
+def test_compute_risk_score_avoid_band():
+    # 1 critical + 3 high = 55 → 51-100 band
+    r = compute_risk_score([
+        {"severity": "critical"},
+        {"severity": "high"}, {"severity": "high"}, {"severity": "high"},
+    ])
+    assert r["raw_score"] == 55
+    assert r["score"] == 55
+    assert r["capped"] is False
+    assert r["recommendation"] == "AVOID"
+    assert r["badge"] == "🚫 AVOID"
+
+
+def test_compute_risk_score_caps_at_100():
+    # 5 criticals = 125 raw, capped to 100
+    findings = [{"severity": "critical"}] * 5
+    r = compute_risk_score(findings)
+    assert r["raw_score"] == 125
+    assert r["score"] == 100
+    assert r["capped"] is True
+    assert r["recommendation"] == "AVOID"
+
+
+def test_compute_risk_score_severity_case_insensitive():
+    r = compute_risk_score([{"severity": "HIGH"}, {"severity": "Medium"}])
+    assert r["counts"]["high"] == 1
+    assert r["counts"]["medium"] == 1
+    assert r["raw_score"] == 13
+
+
+def test_compute_risk_score_ignores_unknown_severity():
+    r = compute_risk_score([
+        {"severity": "info"},  # not in the weight table
+        {"severity": "high"},
+        {"severity": ""},
+        {},  # missing severity
+    ])
+    assert r["raw_score"] == 10
+    assert r["counts"]["total"] == 1
+
+
+def test_compute_risk_score_counts_match_findings():
+    r = compute_risk_score([
+        {"severity": "critical"},
+        {"severity": "high"}, {"severity": "high"},
+        {"severity": "medium"}, {"severity": "medium"}, {"severity": "medium"},
+        {"severity": "low"},
+    ])
+    assert r["counts"] == {
+        "critical": 1, "high": 2, "medium": 3, "low": 1, "total": 7,
+    }
+    # Weights are part of the response so users can audit the math
+    assert r["weights"] == {"critical": 25, "high": 10, "medium": 3, "low": 1}
+
+
+def test_compute_risk_score_band_boundaries():
+    # 15 (top of caution)
+    r15 = compute_risk_score([{"severity": "high"}, {"severity": "high"}] +
+                              [{"severity": "low"}] * 0 +
+                              [{"severity": "low"}] * 0)
+    # 2 high = 20 — actually this isn't the boundary; build one explicitly
+    fifteen = compute_risk_score([{"severity": "high"}, {"severity": "medium"},
+                                   {"severity": "low"}, {"severity": "low"}])
+    assert fifteen["raw_score"] == 15
+    assert fifteen["recommendation"] == "CAUTION"
+
+    # 16 → HIGH_RISK boundary
+    sixteen = compute_risk_score([{"severity": "high"}, {"severity": "medium"},
+                                   {"severity": "medium"}])
+    assert sixteen["raw_score"] == 16
+    assert sixteen["recommendation"] == "HIGH_RISK"
+
+    # 51 → AVOID boundary
+    fifty_one = compute_risk_score([{"severity": "critical"},
+                                     {"severity": "critical"},
+                                     {"severity": "low"}])
+    assert fifty_one["raw_score"] == 51
+    assert fifty_one["recommendation"] == "AVOID"
+
+
+def test_compute_risk_score_handles_none_entries():
+    # Defensive: callers may include None placeholders mid-list
+    r = compute_risk_score([{"severity": "high"}, None, {"severity": "low"}])
+    assert r["raw_score"] == 11
