@@ -52,7 +52,19 @@ After this, you can forget about installation — just use the configured Claude
 
 ### Updating
 
-Re-run the same `curl | bash` command. Existing configuration is preserved; only the server file and prompt source are refreshed.
+Re-run the same `curl | bash` command. Installation is **idempotent** — re-running is always safe. At the start the installer prints a summary of what it found at `~/.tomofound/` and what it will touch:
+
+- **Refreshed:** server Python modules, the security-scan prompt, the MCP-server registration in Claude / Codex configs.
+- **Preserved:** the venv (its `_DEPS_VERSION` marker auto-refreshes deps on the next server start if anything changed), cached ATR catalogs, the Trivy binary, and your historical scan reports under `~/.tomofound/reports/`.
+- **Reported as orphans:** any `*.py` in `~/.tomofound/server/` that this version no longer ships. The installer doesn't delete them — you decide.
+
+If you want a genuinely fresh install (e.g. clearing reports), use `--clean`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash -s -- --clean
+```
+
+`--clean` wipes the entire `~/.tomofound/` directory after a 5-second confirm window. The MCP server registration in `claude_desktop_config.json` / `~/.codex/config.toml` is re-written either way.
 
 ### Uninstall
 
