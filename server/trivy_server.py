@@ -232,6 +232,63 @@ def _source_type(path: str, tag: str) -> str:
     return "other"
 
 
+_TRIVY_DOWNLOAD_TIMEOUT_SEC = 300  # 5 min — Trivy binary tarball is ~50 MB
+_TRIVY_DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024  # 200 MB hard cap
+
+
+def _hash_file_sha256(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch_trivy_checksums(version: str) -> dict[str, str]:
+    """Download Trivy's published `trivy_X.Y.Z_checksums.txt` and return a
+    {archive_filename: sha256_hex} map. Raises on any failure — callers
+    treat that as 'refuse to install' rather than fall back to unverified
+    download."""
+    url = (
+        f"https://github.com/aquasecurity/trivy/releases/download/"
+        f"v{version}/trivy_{version}_checksums.txt"
+    )
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        body = resp.read(64 * 1024).decode("utf-8", errors="replace")
+    checksums: dict[str, str] = {}
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and re.fullmatch(r"[0-9a-f]{64}", parts[0].lower()):
+            checksums[parts[-1]] = parts[0].lower()
+    if not checksums:
+        raise RuntimeError("checksums file present but empty / unparseable")
+    return checksums
+
+
+def _download_trivy_archive(url: str, dest_path: str) -> int:
+    """Stream-download the Trivy archive with an explicit per-call timeout
+    and a hard byte cap (defense against malicious-redirect-into-huge-blob).
+    Returns bytes_written. Raises on any failure."""
+    written = 0
+    with urllib.request.urlopen(url, timeout=_TRIVY_DOWNLOAD_TIMEOUT_SEC) as resp:
+        with open(dest_path, "wb") as out:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _TRIVY_DOWNLOAD_MAX_BYTES:
+                    raise RuntimeError(
+                        f"Trivy archive exceeds {_TRIVY_DOWNLOAD_MAX_BYTES} bytes"
+                    )
+                out.write(chunk)
+    return written
+
+
 def find_or_install_trivy() -> str | None:
     found = shutil.which("trivy")
     if found:
@@ -241,7 +298,10 @@ def find_or_install_trivy() -> str | None:
         return TOOLS_TRIVY
 
     try:
-        with urllib.request.urlopen("https://api.github.com/repos/aquasecurity/trivy/releases/latest") as resp:
+        with urllib.request.urlopen(
+            "https://api.github.com/repos/aquasecurity/trivy/releases/latest",
+            timeout=30,
+        ) as resp:
             data = json.loads(resp.read())
         version = data["tag_name"].lstrip("v")
         system = platform.system()
@@ -258,19 +318,37 @@ def find_or_install_trivy() -> str | None:
             arch = "64bit"
         else:
             return None
-        url = f"https://github.com/aquasecurity/trivy/releases/download/v{version}/trivy_{version}_{os_name}-{arch}.tar.gz"
-        os.makedirs(TOOLS_DIR, exist_ok=True)
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-            tmp_path = tmp.name
-        urllib.request.urlretrieve(url, tmp_path)
+        archive_name = f"trivy_{version}_{os_name}-{arch}.tar.gz"
+        url = f"https://github.com/aquasecurity/trivy/releases/download/v{version}/{archive_name}"
+
+        # Integrity: fetch Trivy's published checksums BEFORE downloading the
+        # binary, so we know exactly what sha256 to expect. If checksums fail
+        # to fetch / parse / list our archive, REFUSE — we'd rather scan
+        # LLM-only than install an unverified binary.
         try:
+            checksums = _fetch_trivy_checksums(version)
+        except Exception:
+            return None
+        expected_sha = checksums.get(archive_name)
+        if not expected_sha:
+            return None
+
+        os.makedirs(TOOLS_DIR, exist_ok=True)
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False, dir=TOOLS_DIR) as tmp:
+            tmp_path = tmp.name
+        try:
+            _download_trivy_archive(url, tmp_path)
+            actual_sha = _hash_file_sha256(tmp_path)
+            if actual_sha != expected_sha:
+                return None  # refuse silently — caller falls back to LLM-only
             import tarfile
             with tarfile.open(tmp_path, "r:gz") as tf:
                 member = tf.getmember("trivy")
                 member.name = os.path.basename(member.name)
                 tf.extract(member, TOOLS_DIR)
         finally:
-            os.unlink(tmp_path)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
         os.chmod(TOOLS_TRIVY, 0o755)
         return TOOLS_TRIVY
     except Exception:

@@ -93,6 +93,156 @@ def test_find_trivy_returns_none_on_all_failures():
         assert result is None
 
 
+# --- Trivy checksum integrity (regression: the scanner found this on itself) ---
+
+from server.trivy_server import _fetch_trivy_checksums, _hash_file_sha256
+
+
+class _CapturingUrlopen:
+    """Stub urllib.request.urlopen that returns canned bytes per URL prefix.
+    Also records every request URL so tests can assert what was fetched."""
+
+    def __init__(self, responses: dict):
+        self.responses = responses
+        self.calls = []
+
+    def __call__(self, url, timeout=None):
+        self.calls.append(url)
+        for prefix, body in self.responses.items():
+            if url.startswith(prefix):
+                return _CapturingUrlopen._FakeResponse(body)
+        raise RuntimeError(f"unexpected URL in test: {url}")
+
+    class _FakeResponse:
+        def __init__(self, data):
+            self._data = data if isinstance(data, bytes) else data.encode()
+            self._offset = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, n=-1):
+            if n is None or n < 0:
+                chunk = self._data[self._offset:]
+                self._offset = len(self._data)
+                return chunk
+            chunk = self._data[self._offset:self._offset + n]
+            self._offset += len(chunk)
+            return chunk
+
+
+def test_fetch_trivy_checksums_parses_published_format():
+    # Explicit `+` between every fragment — implicit string concatenation
+    # binds tighter than `+ "x" * N` in surprising ways.
+    checksums_body = (
+        "a" * 64 + "  trivy_0.59.0_macOS-ARM64.tar.gz\n"
+        + "b" * 64 + "  trivy_0.59.0_Linux-64bit.tar.gz\n"
+        + "# a comment line is skipped\n"
+        + "\n"
+    )
+    stub = _CapturingUrlopen({"https://github.com/aquasecurity/trivy/releases/download/v0.59.0/trivy_0.59.0_checksums.txt": checksums_body})
+    with patch("urllib.request.urlopen", stub):
+        result = _fetch_trivy_checksums("0.59.0")
+    assert result["trivy_0.59.0_macOS-ARM64.tar.gz"] == "a" * 64
+    assert result["trivy_0.59.0_Linux-64bit.tar.gz"] == "b" * 64
+    assert len(result) == 2
+
+
+def test_fetch_trivy_checksums_rejects_empty():
+    stub = _CapturingUrlopen({"https://github.com/aquasecurity/trivy/releases/download/": "# only comments\n"})
+    with patch("urllib.request.urlopen", stub):
+        with pytest.raises(RuntimeError, match="unparseable"):
+            _fetch_trivy_checksums("0.59.0")
+
+
+def test_hash_file_sha256_round_trip(tmp_path):
+    p = tmp_path / "blob.bin"
+    p.write_bytes(b"tomofound")
+    actual = _hash_file_sha256(str(p))
+    # sha256("tomofound") == known constant — recomputed here for clarity
+    import hashlib
+    expected = hashlib.sha256(b"tomofound").hexdigest()
+    assert actual == expected
+    assert len(actual) == 64
+
+
+def test_find_or_install_trivy_refuses_when_checksums_missing(tmp_path, monkeypatch):
+    """If the checksums.txt cannot be fetched we MUST NOT install — better
+    LLM-only than an unverified binary. The scanner found exactly this gap
+    on its own code; the fix should never regress."""
+    monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", str(tmp_path / "trivy"))
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path))
+
+    release_json = json.dumps({"tag_name": "v0.59.0"}).encode()
+
+    def _urlopen(url, timeout=None):
+        if "/releases/latest" in url:
+            return _CapturingUrlopen._FakeResponse(release_json)
+        if "/checksums.txt" in url:
+            raise RuntimeError("checksums fetch failed (simulated)")
+        raise RuntimeError(f"unexpected: {url}")
+
+    with patch("shutil.which", return_value=None), \
+         patch("urllib.request.urlopen", side_effect=_urlopen), \
+         patch("platform.system", return_value="Darwin"), \
+         patch("platform.machine", return_value="arm64"):
+        result = find_or_install_trivy()
+    assert result is None
+
+
+def test_find_or_install_trivy_refuses_on_checksum_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", str(tmp_path / "trivy"))
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path))
+
+    release_json = json.dumps({"tag_name": "v0.59.0"}).encode()
+    archive_bytes = b"not the real trivy archive"
+    checksums = "z" * 64 + "  trivy_0.59.0_macOS-ARM64.tar.gz\n"  # 'z'*64 won't match
+
+    def _urlopen(url, timeout=None):
+        if "/releases/latest" in url:
+            return _CapturingUrlopen._FakeResponse(release_json)
+        if url.endswith("checksums.txt"):
+            return _CapturingUrlopen._FakeResponse(checksums)
+        if url.endswith("trivy_0.59.0_macOS-ARM64.tar.gz"):
+            return _CapturingUrlopen._FakeResponse(archive_bytes)
+        raise RuntimeError(f"unexpected: {url}")
+
+    with patch("shutil.which", return_value=None), \
+         patch("urllib.request.urlopen", side_effect=_urlopen), \
+         patch("platform.system", return_value="Darwin"), \
+         patch("platform.machine", return_value="arm64"):
+        result = find_or_install_trivy()
+    assert result is None
+    # The binary must NOT have been installed.
+    assert not os.path.exists(str(tmp_path / "trivy"))
+
+
+def test_find_or_install_trivy_refuses_when_archive_not_in_checksums(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", str(tmp_path / "trivy"))
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path))
+
+    release_json = json.dumps({"tag_name": "v0.59.0"}).encode()
+    # Checksums file lists a DIFFERENT archive — ours isn't there.
+    checksums = "a" * 64 + "  trivy_0.59.0_Linux-64bit.tar.gz\n"
+
+    def _urlopen(url, timeout=None):
+        if "/releases/latest" in url:
+            return _CapturingUrlopen._FakeResponse(release_json)
+        if url.endswith("checksums.txt"):
+            return _CapturingUrlopen._FakeResponse(checksums)
+        raise RuntimeError(f"should not have downloaded archive: {url}")
+
+    with patch("shutil.which", return_value=None), \
+         patch("urllib.request.urlopen", side_effect=_urlopen), \
+         patch("platform.system", return_value="Darwin"), \
+         patch("platform.machine", return_value="arm64"):
+        result = find_or_install_trivy()
+    assert result is None
+
+
 # --- query_osv ---
 
 def test_query_osv_returns_vulns():
