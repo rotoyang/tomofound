@@ -57,10 +57,21 @@ done
 echo "Setting up tomofound..."
 
 mkdir -p "$SERVER_DIR" "$SKILL_DIR"
-curl -fsSL "$BASE_URL/server/trivy_server.py" -o "$SERVER_DIR/trivy_server.py"
+
+# Every Python module trivy_server.py imports at runtime must be listed here.
+# When adding a new file under server/, also add it to this list AND to the
+# README Supply chain > Repository assets table (enforced by CLAUDE.md).
+SERVER_FILES=(
+  trivy_server.py
+  python_analyzer.py
+  atr_catalog.py
+)
+for f in "${SERVER_FILES[@]}"; do
+  curl -fsSL "$BASE_URL/server/$f" -o "$SERVER_DIR/$f"
+done
 chmod +x "$SERVER_DIR/trivy_server.py"
 curl -fsSL "$BASE_URL/skills/security-scan/security-scan.md" -o "$SKILL_DIR/security-scan.md"
-echo "✅ Server + prompt source installed to $DATA_ROOT"
+echo "✅ Server (${#SERVER_FILES[@]} modules) + prompt source installed to $DATA_ROOT"
 
 if [[ "$INSTALL_CLAUDE" -eq 1 ]]; then
 mkdir -p "$(dirname "$CLAUDE_CONFIG_PATH")"

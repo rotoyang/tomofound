@@ -9,6 +9,7 @@ tomofound is a security tool whose users run it with elevated trust. Its own ext
 - A new outbound URL pattern called from server code (`urllib.request.urlopen`, `subprocess.run(["git", ...])`, the `_SSRF_SAFE_OPENER`, etc.).
 - A new file the installer writes outside `~/.tomofound/`.
 - A new bundled repo asset that ships to user machines (`server/`, `skills/`, `integrations/`, `setup.sh`).
+- A new Python module under `server/` that `trivy_server.py` imports at runtime. **The `SERVER_FILES` list inside `setup.sh` MUST be updated in the same PR** — otherwise real users running `curl … setup.sh | bash` get a broken install (the import succeeds at dev time on a full git tree, but `setup.sh` only fetches the files it explicitly lists). Smoke-test by re-running `bash setup.sh` against a clean `~/.tomofound/`.
 
 If you can't update the README tables in the same change (for example because the new dependency isn't decided yet), open the PR as a draft and list the missing entries in the PR description.
 
