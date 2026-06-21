@@ -165,18 +165,36 @@ Call MCP tool: atr_update
 auto-run. Once it succeeds, the catalog lives at `~/.tomofound/catalogs/atr/` and
 all subsequent scans are offline.
 
-For each target whose `read_file` content has already been loaded for LLM analysis
-(see Step 3), additionally call:
+**Preferred: batch scan with `atr_scan_path`** — for installed-extension scans (or any
+multi-file target), call this **once per scan root** instead of looping `atr_match`
+per file:
+
+```
+Call MCP tool: atr_scan_path
+  path: "<absolute path of a scan root, e.g. ~/.claude/plugins, ~/.claude/skills, etc>"
+  recursive: true                ← default; omit unless you need top-level only
+  extensions: [".md", ".json", ".toml", ".yaml", ".yml"]  ← default; omit unless overriding
+```
+
+The server walks the path, reads each file inside the MCP server, and runs the
+catalog against every body — file content never returns through the LLM. Returns
+`{files_scanned, files_with_findings, findings, rules_evaluated}` or
+`{catalog_missing: true, ...}`. Only files that produced findings are listed; clean
+files are counted but not enumerated. This is the cheapest way to get ATR coverage
+on the ~1000s of vendor docs bundled inside official plugins.
+
+**Fallback: per-content `atr_match`** — only when you've already loaded a file's
+content for LLM analysis and don't want a separate disk read, or when the content
+isn't on disk (e.g. an MCP exchange transcript you assembled in memory):
 
 ```
 Call MCP tool: atr_match
-  content: "<the file body>"
+  content: "<the file body or in-memory transcript>"
   file_hint: "<the item path so findings carry it>"
 ```
 
-The tool returns `{ findings, rules_evaluated }` or `{ findings: [], catalog_missing: true }`.
-Each finding has the standard shape plus `detected_by: "ATR"` and a `provenance` block
-with the source rule's `rule_id`, `catalog_version`, `rule_category`, `rule_maturity`,
+Both tools return findings in the same canonical shape: `detected_by: "ATR"` plus a
+`provenance` block with `rule_id`, `catalog_version`, `rule_category`, `rule_maturity`,
 and `references` (OWASP Agentic / MITRE ATLAS / CVE). Merge these into the per-item
 findings list. In the rendered report, surface the rule ID and references inline so
 the user can audit upstream — example:
