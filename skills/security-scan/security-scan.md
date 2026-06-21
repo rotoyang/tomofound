@@ -166,22 +166,39 @@ auto-run. Once it succeeds, the catalog lives at `~/.tomofound/catalogs/atr/` an
 all subsequent scans are offline.
 
 **Preferred: batch scan with `atr_scan_path`** — for installed-extension scans (or any
-multi-file target), call this **once per scan root** instead of looping `atr_match`
-per file:
+multi-file target), call this **once per plugin / skill root** instead of looping
+`atr_match` per file:
 
 ```
 Call MCP tool: atr_scan_path
-  path: "<absolute path of a scan root, e.g. ~/.claude/plugins, ~/.claude/skills, etc>"
+  path: "<absolute path of ONE plugin or skill root, e.g.
+         ~/.claude/plugins/cache/<publisher>/<plugin>/<version>/,
+         or ~/.claude/skills/<skill-name>/,
+         or ~/.codex/skills/<skill-name>/>"
   recursive: true                ← default; omit unless you need top-level only
   extensions: [".md", ".json", ".toml", ".yaml", ".yml"]  ← default; omit unless overriding
 ```
 
+**Do NOT pass the whole ~/.claude tree in one call.** The server has a 30-second
+wall-clock + 5,000-file safety budget per call; whole-home-tree invocations hit
+the budget, return partial results with `budget_exceeded: true`, and waste time
+that per-plugin calls would have spent productively. Walk the
+`discover_targets` output and call `atr_scan_path` once per distinct plugin /
+skill root.
+
 The server walks the path, reads each file inside the MCP server, and runs the
 catalog against every body — file content never returns through the LLM. Returns
 `{files_scanned, files_with_findings, findings, rules_evaluated}` or
-`{catalog_missing: true, ...}`. Only files that produced findings are listed; clean
-files are counted but not enumerated. This is the cheapest way to get ATR coverage
-on the ~1000s of vendor docs bundled inside official plugins.
+`{catalog_missing: true, ...}` or (if a budget tripped)
+`{... budget_exceeded: true, budget_reason: "..."}`. Only files that produced
+findings are listed; clean files are counted but not enumerated. This is the
+cheapest way to get ATR coverage on the ~1000s of vendor docs bundled inside
+official plugins.
+
+If `budget_exceeded: true` comes back, re-invoke on a narrower subdirectory or
+raise `time_budget_seconds` / `max_files` for that single call (only do this
+when you know the target tree is bounded — e.g. one large plugin you trust to
+not be a runaway symlink loop).
 
 **Fallback: per-content `atr_match`** — only when you've already loaded a file's
 content for LLM analysis and don't want a separate disk read, or when the content
