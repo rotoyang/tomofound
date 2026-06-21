@@ -869,6 +869,151 @@ def to_sarif(findings: list, scan_root: str | None = None) -> dict:
     }
 
 
+_SEVERITY_WEIGHTS = {"critical": 25, "high": 10, "medium": 3, "low": 1}
+
+_RECOMMENDATION_TABLE = [
+    (0, 0, "SAFE", "✅ SAFE", "no findings"),
+    (1, 15, "CAUTION", "🔵 CAUTION",
+     "review findings before relying on these extensions"),
+    (16, 50, "HIGH_RISK", "⚠️ HIGH RISK",
+     "fix or remove flagged items before further use"),
+    (51, 100, "AVOID", "🚫 AVOID",
+     "do not install, or uninstall immediately"),
+]
+
+
+def compute_risk_score(findings: list) -> dict:
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    raw_score = 0
+    for f in findings or []:
+        sev = str((f or {}).get("severity") or "").lower()
+        if sev not in counts:
+            continue
+        counts[sev] += 1
+        raw_score += _SEVERITY_WEIGHTS[sev]
+
+    score = min(raw_score, 100)
+    capped = raw_score > 100
+
+    recommendation = "SAFE"
+    badge = "✅ SAFE"
+    description = "no findings"
+    for lo, hi, rec, bdg, desc in _RECOMMENDATION_TABLE:
+        if lo <= score <= hi:
+            recommendation = rec
+            badge = bdg
+            description = desc
+            break
+
+    counts["total"] = sum(counts[k] for k in ("critical", "high", "medium", "low"))
+
+    return {
+        "score": score,
+        "raw_score": raw_score,
+        "capped": capped,
+        "recommendation": recommendation,
+        "badge": badge,
+        "description": description,
+        "counts": counts,
+        "weights": dict(_SEVERITY_WEIGHTS),
+    }
+
+
+_ATR_SCAN_DEFAULT_EXTS = (".md", ".json", ".toml", ".yaml", ".yml")
+
+# Skip hidden / vendor / cache dirs by default — these never carry
+# user-facing skill content and explode the file count for no benefit.
+_ATR_SCAN_SKIP_DIRS = (
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    ".pytest_cache", ".mypy_cache", ".idea", ".vscode",
+)
+
+
+def _atr_scan_iter_files(root: str, recursive: bool, extensions: tuple):
+    """Yield absolute paths under `root` matching `extensions`. Skips hidden
+    and vendor directories. Caller is responsible for path safety."""
+    if os.path.isfile(root):
+        if not extensions or root.lower().endswith(extensions):
+            yield root
+        return
+    if not os.path.isdir(root):
+        return
+    if not recursive:
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            return
+        for name in entries:
+            p = os.path.join(root, name)
+            if os.path.isfile(p) and (not extensions or name.lower().endswith(extensions)):
+                yield p
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _ATR_SCAN_SKIP_DIRS and not d.startswith(".")]
+        for name in sorted(filenames):
+            if extensions and not name.lower().endswith(extensions):
+                continue
+            yield os.path.join(dirpath, name)
+
+
+def atr_scan_path(path: str, recursive: bool = True, extensions: list | None = None) -> dict:
+    """Server-side batch ATR scan: walk `path`, read each file, match against
+    the cached ATR catalog — all inside the server, never sending file content
+    back through the LLM. Returns only files that produced findings.
+
+    Path safety: same contract as `read_file`. The target must be under one of
+    `_READ_ALLOWED_PREFIXES` (~/.claude, ~/.gemini, ~/.codex) AND pass
+    `_is_safe_root` (which excludes ~/.ssh, ~/.aws, ...).
+    """
+    abs_path = os.path.abspath(os.path.expanduser(path))
+    if not _is_safe_root(abs_path):
+        return {"error": "path not permitted"}
+    allowed = [_ensure_trailing_sep(p) for p in _READ_ALLOWED_PREFIXES]
+    if not any(abs_path == p.rstrip(os.sep) or abs_path.startswith(p) for p in allowed):
+        return {"error": "path not permitted"}
+    if not os.path.exists(abs_path):
+        return {"error": "path not found"}
+
+    if extensions is None:
+        ext_tuple = _ATR_SCAN_DEFAULT_EXTS
+    elif extensions == []:
+        ext_tuple = ()  # explicit no-filter: scan every file
+    else:
+        ext_tuple = tuple(
+            e.lower() if e.startswith(".") else "." + e.lower()
+            for e in extensions if isinstance(e, str)
+        )
+
+    files_skipped_too_large = 0
+    files_skipped_unreadable = 0
+
+    def _iter_items():
+        nonlocal files_skipped_too_large, files_skipped_unreadable
+        for fp in _atr_scan_iter_files(abs_path, recursive, ext_tuple):
+            try:
+                size = os.path.getsize(fp)
+            except OSError:
+                files_skipped_unreadable += 1
+                continue
+            if size > FILE_READ_LIMIT:
+                files_skipped_too_large += 1
+                continue
+            try:
+                with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                files_skipped_unreadable += 1
+                continue
+            yield (fp, content)
+
+    result = atr_catalog.scan_contents(_iter_items())
+    if files_skipped_too_large:
+        result["files_skipped_too_large"] = files_skipped_too_large
+    if files_skipped_unreadable:
+        result["files_skipped_unreadable"] = files_skipped_unreadable
+    return result
+
+
 def _load_prompt_source() -> str:
     for candidate in _PROMPT_SOURCE_CANDIDATES:
         if os.path.isfile(candidate):
@@ -1150,6 +1295,44 @@ if Server is not None:
                 description="Aggregated freshness status for every catalog / source the scanner consults — ATR (local), OSV (live API), Trivy (managed binary). Returns {catalogs: [{source, name, mode, available, version?, license, attribution, ...}, ...]}. The skill renders this into every scan report's header so the user can see at a glance what catalogs were used, what version, and what license. Never blocks on network — each probe is local-only.",
                 inputSchema={"type": "object", "properties": {}},
             ),
+            types.Tool(
+                name="atr_scan_path",
+                description="Server-side batch ATR scan: walks `path`, reads each file, runs the cached ATR regex catalog against it — all inside the server, never streaming file content back through the LLM. Returns ONLY files that produced findings; clean files are counted but not enumerated. Default extensions: .md/.json/.toml/.yaml/.yml. Path safety: same as read_file — must be under ~/.claude, ~/.gemini, or ~/.codex. Returns {files_scanned, files_with_findings, findings, rules_evaluated} on success, {error} on path-not-permitted, or {catalog_missing: true, ...} if atr_update hasn't been run.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to a directory or single file under ~/.claude, ~/.gemini, or ~/.codex.",
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "Recurse into subdirectories. Default true. Hidden and vendor dirs (.git, node_modules, __pycache__, .venv, .pytest_cache, .idea, .vscode) are always skipped.",
+                        },
+                        "extensions": {
+                            "type": "array",
+                            "description": "Extensions to scan (e.g. ['.md', '.json']). Omit for the default set. Pass [] to scan every file regardless of extension.",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            types.Tool(
+                name="compute_risk_score",
+                description="Deterministically compute the 0-100 risk score and install recommendation from a list of findings. Severity weights: critical=25, high=10, medium=3, low=1, capped at 100. Recommendation bands: 0=SAFE, 1-15=CAUTION, 16-50=HIGH_RISK, 51-100=AVOID. Returns {score, raw_score, capped, recommendation, badge, description, counts:{critical,high,medium,low,total}, weights}. Use this instead of summing weights by hand so the score never drifts between runs.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "findings": {
+                            "type": "array",
+                            "description": "List of findings (canonical shape). Each must have a `severity` field of critical|high|medium|low; unknown severities are ignored.",
+                            "items": {"type": "object"},
+                        },
+                    },
+                    "required": ["findings"],
+                },
+            ),
         ]
 
     @_server.call_tool()
@@ -1271,6 +1454,18 @@ if Server is not None:
 
         if name == "catalogs_status":
             result = catalogs_status()
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "atr_scan_path":
+            result = atr_scan_path(
+                path=arguments["path"],
+                recursive=arguments.get("recursive", True),
+                extensions=arguments.get("extensions"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "compute_risk_score":
+            result = compute_risk_score(findings=arguments.get("findings") or [])
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")

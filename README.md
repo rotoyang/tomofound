@@ -8,9 +8,9 @@ Scans extensions installed for Claude Code, Gemini CLI, and Codex CLI for secret
 
 tomofound is **install once, then use it from Claude or Codex**:
 
-1. Run `setup.sh` manually one time to install the shared MCP server and scan rules.
-2. The installer registers Tomofound with Claude and Codex.
-3. From then on, invoke `/security_scan` in Claude or the `security-scan` skill in Codex — no further setup, no per-scan installation, no Trivy install (auto-handled on first scan).
+1. Run `setup.sh` one time to install the MCP server and scan-rule prompt.
+2. Add the scan-rule prompt as a **Skill** in Claude Desktop App (one-time drag-and-drop).
+3. From then on, type `/security-scan` in any Claude **chat** to scan — no further setup, no per-scan installation, no Trivy install (auto-handled on first scan).
 
 ## Requirements
 
@@ -21,6 +21,8 @@ tomofound is **install once, then use it from Claude or Codex**:
 - `git` on PATH (only needed when you pass a `https://github.com/...` URL)
 
 ## Installation (one-time)
+
+### Step 1 — Run the installer
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash
@@ -36,19 +38,26 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash -s -- --codex
 ```
 
-Then restart the app you configured:
+### Step 2 — Register the skill in Claude Desktop App
 
-- Claude: quit fully (Cmd-Q) and reopen it. Verify by typing `/` in any chat — `/security_scan` should appear in the slash menu.
-- Codex: restart Codex or open a new thread. The `security-scan` skill should be available and the `tomofound` MCP tools should load.
+1. Open Claude Desktop App.
+2. Open **Settings → Customize → Skills**.
+3. Drag `~/.tomofound/skills/security-scan/security-scan.md` into the Skills list.
+4. Quit Claude fully (**Cmd-Q**) and reopen it.
+5. Verify: type `/` in any **chat** — `/security-scan` should appear in the slash menu.
 
-What the installer does:
+### Step 2 (Codex) — Restart Codex
 
-1. Copies the MCP server (`trivy_server.py`) and the Claude scan-rule prompt (`security-scan.md`) into `~/.tomofound/`
+Restart Codex or open a new thread. The `security-scan` skill should be available and the `tomofound` MCP tools should load.
+
+### What the installer does
+
+1. Copies the MCP server (`trivy_server.py`) and the scan-rule prompt (`security-scan.md`) into `~/.tomofound/`
 2. Registers the `tomofound` MCP server in `~/Library/Application Support/Claude/claude_desktop_config.json`
 3. Installs the Codex skill wrapper into `~/.codex/skills/security-scan/SKILL.md`
 4. Registers the `tomofound` MCP server in `~/.codex/config.toml`
 
-After this, you can forget about installation — just use the configured Claude or Codex entry point.
+After this, you can forget about installation — just use `/security-scan` in Claude chat or the `security-scan` skill in Codex.
 
 ### Updating
 
@@ -73,36 +82,41 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 rm -rf ~/.tomofound
 ```
 
-Then remove the `"tomofound"` key under `mcpServers` in `~/Library/Application Support/Claude/claude_desktop_config.json` (edit by hand — the file holds other Claude preferences too).
+Then:
+
+1. In Claude Desktop App, open **Settings → Customize → Skills** and remove `security-scan`.
+2. Remove the `"tomofound"` key under `mcpServers` in `~/Library/Application Support/Claude/claude_desktop_config.json` (edit by hand — the file holds other Claude preferences too).
 
 ## Usage
 
-Once installed, the scan entry point is always available in configured apps. No need to re-run `setup.sh` between scans.
+Once installed, the scan entry point is always available. No need to re-run `setup.sh` between scans. Use Claude Desktop App **chat** (not Cowork) for the most reliable experience.
 
-### Claude
+### Claude (chat)
+
+Type `/security-scan` in any Claude chat window, then follow it with a target:
 
 ```
 # Scan everything installed on this Mac
-/security_scan
+/security-scan
 
 # Scan only Claude Code plugins / skills / agents / commands
-/security_scan --target claude
+/security-scan --target claude
 
 # Scan only Gemini CLI config + extensions
-/security_scan --target gemini
+/security-scan --target gemini
 
 # Scan only Codex CLI config + prompts
-/security_scan --target openai
+/security-scan --target openai
 
 # Pre-install — scan a local directory
-/security_scan ~/Downloads/plugin-dir/
+/security-scan ~/Downloads/plugin-dir/
 
 # Pre-install — scan a public GitHub repo
-/security_scan https://github.com/user/plugin
+/security-scan https://github.com/user/plugin
 
 # Pre-install — scan a .zip archive (local path or https URL)
-/security_scan ~/Downloads/plugin.zip
-/security_scan https://example.com/plugin.zip
+/security-scan ~/Downloads/plugin.zip
+/security-scan https://example.com/plugin.zip
 ```
 
 ### Codex
@@ -135,7 +149,7 @@ Each scan produces a 0–100 risk score (severity-weighted across all findings) 
 
 ## How rules work
 
-Detection rules live in `skills/security-scan/security-scan.md` (installed locally to `~/.tomofound/skills/security-scan/security-scan.md`). The MCP server loads this file at startup and serves it as the Claude `/security_scan` prompt. Codex uses `integrations/codex/skills/security-scan/SKILL.md` as a lightweight skill wrapper around the same MCP tools. To add a shared scan rule, edit the Claude prompt and Codex wrapper as needed, then re-run the installer.
+Detection rules live in `skills/security-scan/security-scan.md` (installed locally to `~/.tomofound/skills/security-scan/security-scan.md`). The MCP server loads this file at startup and serves it as the Claude `/security-scan` prompt. Codex uses `integrations/codex/skills/security-scan/SKILL.md` as a lightweight skill wrapper around the same MCP tools. To add a shared scan rule, edit the Claude prompt and Codex wrapper as needed, then re-run the installer.
 
 ## Reports
 

@@ -449,11 +449,70 @@ def match_content(content: str, file_hint: str | None = None) -> dict:
         }
     if not isinstance(content, str) or not content:
         return {"findings": [], "rules_evaluated": 0}
+    findings = _match_against_catalog(catalog, content, file_hint)
+    return {"findings": findings, "rules_evaluated": len(catalog.get("rules", []))}
 
+
+def scan_contents(items) -> dict:
+    """Batch-match the ATR catalog against an iterable of (file_path, content)
+    tuples. Loads the catalog once and reuses it across every item, which is
+    the whole point of this helper — `match_content` reloads the catalog on
+    every call and is wasteful for batch scans.
+
+    `items` may be a list, generator, or any iterable. Each item must be
+    `(path, content)` where path is the attribution string copied into
+    finding.file, and content is the file body. Items with empty content
+    or non-string content are counted as scanned but produce no findings.
+
+    Returns `{"files_scanned", "files_with_findings", "findings",
+    "rules_evaluated"}`. Only files that produced at least one finding
+    contribute to `findings` — clean files are counted but not enumerated,
+    which is what makes this cheap to return to a token-billed caller.
+
+    If the catalog isn't cached, returns `{"catalog_missing": True, ...}`
+    so the caller can advise the user to run `atr_update`."""
+    catalog = _load_catalog()
+    if catalog is None:
+        return {
+            "findings": [],
+            "files_scanned": 0,
+            "files_with_findings": 0,
+            "catalog_missing": True,
+            "note": "ATR catalog not present locally — run atr_update.",
+        }
+
+    rules = catalog.get("rules", [])
+    all_findings: list = []
+    files_scanned = 0
+    files_with_findings = 0
+
+    for item in items:
+        try:
+            path, content = item
+        except (TypeError, ValueError):
+            continue
+        files_scanned += 1
+        if not isinstance(content, str) or not content:
+            continue
+        file_findings = _match_against_catalog(catalog, content, path)
+        if file_findings:
+            files_with_findings += 1
+            all_findings.extend(file_findings)
+
+    return {
+        "findings": all_findings,
+        "files_scanned": files_scanned,
+        "files_with_findings": files_with_findings,
+        "rules_evaluated": len(rules),
+    }
+
+
+def _match_against_catalog(catalog: dict, content: str, file_hint: str | None) -> list:
+    """Run every rule in `catalog` against `content`. Returns the list of
+    canonical findings (without wrapping summary fields). Shared by
+    `match_content` (single-file) and `scan_contents` (batch)."""
     findings: list = []
-    rules_evaluated = 0
     for rule in catalog.get("rules", []):
-        rules_evaluated += 1
         for pat in rule.get("patterns", []):
             try:
                 m = re.search(pat["pattern"], content)
@@ -489,5 +548,4 @@ def match_content(content: str, file_hint: str | None = None) -> dict:
             })
             # First match per rule is enough; don't multi-fire on the same rule.
             break
-
-    return {"findings": findings, "rules_evaluated": rules_evaluated}
+    return findings
