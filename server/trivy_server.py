@@ -956,7 +956,17 @@ def _atr_scan_iter_files(root: str, recursive: bool, extensions: tuple):
             yield os.path.join(dirpath, name)
 
 
-def atr_scan_path(path: str, recursive: bool = True, extensions: list | None = None) -> dict:
+_ATR_SCAN_DEFAULT_TIME_BUDGET = 30.0   # seconds; tuned for whole-tree ~/.claude scans
+_ATR_SCAN_DEFAULT_MAX_FILES = 5000
+
+
+def atr_scan_path(
+    path: str,
+    recursive: bool = True,
+    extensions: list | None = None,
+    time_budget_seconds: float | None = None,
+    max_files: int | None = None,
+) -> dict:
     """Server-side batch ATR scan: walk `path`, read each file, match against
     the cached ATR catalog — all inside the server, never sending file content
     back through the LLM. Returns only files that produced findings.
@@ -964,7 +974,16 @@ def atr_scan_path(path: str, recursive: bool = True, extensions: list | None = N
     Path safety: same contract as `read_file`. The target must be under one of
     `_READ_ALLOWED_PREFIXES` (~/.claude, ~/.gemini, ~/.codex) AND pass
     `_is_safe_root` (which excludes ~/.ssh, ~/.aws, ...).
+
+    Budgets: stops early once `time_budget_seconds` of wall time has passed
+    (default 30s) OR `max_files` have been processed (default 5,000). When
+    that happens, the returned dict carries `budget_exceeded: true` with the
+    reason and the partial counters so the caller can decide whether to
+    re-invoke on a narrower path. The budget protects the MCP event loop
+    from a 4-minute hang on a whole-home-tree scan.
     """
+    import time
+
     abs_path = os.path.abspath(os.path.expanduser(path))
     if not _is_safe_root(abs_path):
         return {"error": "path not permitted"}
@@ -984,12 +1003,38 @@ def atr_scan_path(path: str, recursive: bool = True, extensions: list | None = N
             for e in extensions if isinstance(e, str)
         )
 
+    time_budget = (
+        float(time_budget_seconds)
+        if time_budget_seconds is not None
+        else _ATR_SCAN_DEFAULT_TIME_BUDGET
+    )
+    file_budget = (
+        int(max_files)
+        if max_files is not None
+        else _ATR_SCAN_DEFAULT_MAX_FILES
+    )
+
     files_skipped_too_large = 0
     files_skipped_unreadable = 0
+    files_yielded = 0
+    budget_exceeded_reason: str | None = None
+
+    deadline = time.monotonic() + time_budget
 
     def _iter_items():
         nonlocal files_skipped_too_large, files_skipped_unreadable
+        nonlocal files_yielded, budget_exceeded_reason
         for fp in _atr_scan_iter_files(abs_path, recursive, ext_tuple):
+            if time.monotonic() >= deadline:
+                budget_exceeded_reason = (
+                    f"time budget {time_budget:.0f}s exceeded — re-invoke on a narrower path"
+                )
+                return
+            if files_yielded >= file_budget:
+                budget_exceeded_reason = (
+                    f"file budget {file_budget} files exceeded — re-invoke on a narrower path"
+                )
+                return
             try:
                 size = os.path.getsize(fp)
             except OSError:
@@ -1004,6 +1049,7 @@ def atr_scan_path(path: str, recursive: bool = True, extensions: list | None = N
             except OSError:
                 files_skipped_unreadable += 1
                 continue
+            files_yielded += 1
             yield (fp, content)
 
     result = atr_catalog.scan_contents(_iter_items())
@@ -1011,6 +1057,9 @@ def atr_scan_path(path: str, recursive: bool = True, extensions: list | None = N
         result["files_skipped_too_large"] = files_skipped_too_large
     if files_skipped_unreadable:
         result["files_skipped_unreadable"] = files_skipped_unreadable
+    if budget_exceeded_reason:
+        result["budget_exceeded"] = True
+        result["budget_reason"] = budget_exceeded_reason
     return result
 
 
@@ -1297,13 +1346,13 @@ if Server is not None:
             ),
             types.Tool(
                 name="atr_scan_path",
-                description="Server-side batch ATR scan: walks `path`, reads each file, runs the cached ATR regex catalog against it — all inside the server, never streaming file content back through the LLM. Returns ONLY files that produced findings; clean files are counted but not enumerated. Default extensions: .md/.json/.toml/.yaml/.yml. Path safety: same as read_file — must be under ~/.claude, ~/.gemini, or ~/.codex. Returns {files_scanned, files_with_findings, findings, rules_evaluated} on success, {error} on path-not-permitted, or {catalog_missing: true, ...} if atr_update hasn't been run.",
+                description="Server-side batch ATR scan: walks `path`, reads each file, runs the cached ATR regex catalog against it — all inside the server, never streaming file content back through the LLM. Returns ONLY files that produced findings; clean files are counted but not enumerated. Default extensions: .md/.json/.toml/.yaml/.yml. Path safety: same as read_file — must be under ~/.claude, ~/.gemini, or ~/.codex. Stops early after time_budget_seconds (default 30) OR max_files (default 5000) — returns partial findings + `budget_exceeded: true` so the caller can re-invoke on a narrower path (e.g. one plugin at a time) rather than the whole home tree. Returns {files_scanned, files_with_findings, findings, rules_evaluated} on success, {error} on path-not-permitted, or {catalog_missing: true, ...} if atr_update hasn't been run.",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Absolute path to a directory or single file under ~/.claude, ~/.gemini, or ~/.codex.",
+                            "description": "Absolute path to a directory or single file under ~/.claude, ~/.gemini, or ~/.codex. For best results scan one plugin or skill root at a time (e.g. ~/.claude/plugins/cache/<publisher>/<plugin>/<version>/), not the whole ~/.claude tree.",
                         },
                         "recursive": {
                             "type": "boolean",
@@ -1313,6 +1362,14 @@ if Server is not None:
                             "type": "array",
                             "description": "Extensions to scan (e.g. ['.md', '.json']). Omit for the default set. Pass [] to scan every file regardless of extension.",
                             "items": {"type": "string"},
+                        },
+                        "time_budget_seconds": {
+                            "type": "number",
+                            "description": "Wall-clock budget in seconds. Default 30. Stops scanning once exceeded and returns partial results with `budget_exceeded: true`.",
+                        },
+                        "max_files": {
+                            "type": "integer",
+                            "description": "Maximum number of files to actually scan (excludes skipped). Default 5000. Stops once exceeded and returns partial results with `budget_exceeded: true`.",
                         },
                     },
                     "required": ["path"],
@@ -1457,10 +1514,18 @@ if Server is not None:
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "atr_scan_path":
-            result = atr_scan_path(
+            # Run on a worker thread — the file walk + regex pass is CPU/IO heavy
+            # and would otherwise block the MCP event loop for the full scan
+            # duration, freezing every other tool call (atr_status, etc.) on the
+            # same server until it returned. The handler itself stays async so
+            # client-side cancellations still propagate.
+            result = await asyncio.to_thread(
+                atr_scan_path,
                 path=arguments["path"],
                 recursive=arguments.get("recursive", True),
                 extensions=arguments.get("extensions"),
+                time_budget_seconds=arguments.get("time_budget_seconds"),
+                max_files=arguments.get("max_files"),
             )
             return [types.TextContent(type="text", text=json.dumps(result))]
 
