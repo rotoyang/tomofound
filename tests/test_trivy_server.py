@@ -1360,7 +1360,9 @@ def test_atr_scan_path_time_budget_stops_early(tmp_path, monkeypatch):
     skills.mkdir(parents=True)
     for i in range(20):
         (skills / f"f{i:02d}.md").write_text("safe content")
-    # 0-second budget: should stop before yielding the first file
+    # 0-second budget: deadline already past on first iteration — stops before
+    # scanning anything. Reason now comes from scan_contents (it owns the
+    # time budget; atr_scan_path only owns the file-count budget).
     r = atr_scan_path(str(skills), time_budget_seconds=0)
     assert r.get("budget_exceeded") is True
     assert "time budget" in r["budget_reason"]
