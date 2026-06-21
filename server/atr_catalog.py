@@ -453,7 +453,7 @@ def match_content(content: str, file_hint: str | None = None) -> dict:
     return {"findings": findings, "rules_evaluated": len(catalog.get("rules", []))}
 
 
-def scan_contents(items) -> dict:
+def scan_contents(items, deadline: float | None = None) -> dict:
     """Batch-match the ATR catalog against an iterable of (file_path, content)
     tuples. Loads the catalog once and reuses it across every item, which is
     the whole point of this helper — `match_content` reloads the catalog on
@@ -464,13 +464,22 @@ def scan_contents(items) -> dict:
     finding.file, and content is the file body. Items with empty content
     or non-string content are counted as scanned but produce no findings.
 
+    `deadline` is an optional `time.monotonic()` value after which to stop
+    scanning. Checked both between files AND between rules within a file —
+    the latter matters when an ATR rule's regex hits catastrophic
+    backtracking on a particular file, which would otherwise burn many
+    seconds before the next per-file check fires.
+
     Returns `{"files_scanned", "files_with_findings", "findings",
     "rules_evaluated"}`. Only files that produced at least one finding
     contribute to `findings` — clean files are counted but not enumerated,
-    which is what makes this cheap to return to a token-billed caller.
+    which is what makes this cheap to return to a token-billed caller. If
+    the deadline trips, adds `budget_exceeded: True` plus a `budget_reason`.
 
     If the catalog isn't cached, returns `{"catalog_missing": True, ...}`
     so the caller can advise the user to run `atr_update`."""
+    import time
+
     catalog = _load_catalog()
     if catalog is None:
         return {
@@ -485,34 +494,63 @@ def scan_contents(items) -> dict:
     all_findings: list = []
     files_scanned = 0
     files_with_findings = 0
+    budget_exceeded = False
+    budget_reason: str | None = None
 
     for item in items:
         try:
             path, content = item
         except (TypeError, ValueError):
             continue
+        if deadline is not None and time.monotonic() >= deadline:
+            budget_exceeded = True
+            budget_reason = "time budget exceeded between files — re-invoke on a narrower path"
+            break
         files_scanned += 1
         if not isinstance(content, str) or not content:
             continue
-        file_findings = _match_against_catalog(catalog, content, path)
+        file_findings = _match_against_catalog(catalog, content, path, deadline=deadline)
         if file_findings:
             files_with_findings += 1
             all_findings.extend(file_findings)
+        if deadline is not None and time.monotonic() >= deadline:
+            budget_exceeded = True
+            budget_reason = (
+                "time budget exceeded mid-file — likely a slow regex; "
+                "re-invoke on a narrower path"
+            )
+            break
 
-    return {
+    result = {
         "findings": all_findings,
         "files_scanned": files_scanned,
         "files_with_findings": files_with_findings,
         "rules_evaluated": len(rules),
     }
+    if budget_exceeded:
+        result["budget_exceeded"] = True
+        result["budget_reason"] = budget_reason
+    return result
 
 
-def _match_against_catalog(catalog: dict, content: str, file_hint: str | None) -> list:
+def _match_against_catalog(
+    catalog: dict, content: str, file_hint: str | None,
+    deadline: float | None = None,
+) -> list:
     """Run every rule in `catalog` against `content`. Returns the list of
     canonical findings (without wrapping summary fields). Shared by
-    `match_content` (single-file) and `scan_contents` (batch)."""
+    `match_content` (single-file) and `scan_contents` (batch).
+
+    `deadline` is an optional `time.monotonic()` value after which to bail
+    mid-iteration. The check happens BEFORE each rule's `re.search` call,
+    so a single runaway regex can extend the actual stop time by one
+    rule's worth, but not arbitrarily."""
+    import time
+
     findings: list = []
     for rule in catalog.get("rules", []):
+        if deadline is not None and time.monotonic() >= deadline:
+            return findings
         for pat in rule.get("patterns", []):
             try:
                 m = re.search(pat["pattern"], content)

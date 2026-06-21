@@ -1017,23 +1017,16 @@ def atr_scan_path(
     files_skipped_too_large = 0
     files_skipped_unreadable = 0
     files_yielded = 0
-    budget_exceeded_reason: str | None = None
+    file_budget_exceeded = False
 
     deadline = time.monotonic() + time_budget
 
     def _iter_items():
         nonlocal files_skipped_too_large, files_skipped_unreadable
-        nonlocal files_yielded, budget_exceeded_reason
+        nonlocal files_yielded, file_budget_exceeded
         for fp in _atr_scan_iter_files(abs_path, recursive, ext_tuple):
-            if time.monotonic() >= deadline:
-                budget_exceeded_reason = (
-                    f"time budget {time_budget:.0f}s exceeded — re-invoke on a narrower path"
-                )
-                return
             if files_yielded >= file_budget:
-                budget_exceeded_reason = (
-                    f"file budget {file_budget} files exceeded — re-invoke on a narrower path"
-                )
+                file_budget_exceeded = True
                 return
             try:
                 size = os.path.getsize(fp)
@@ -1052,14 +1045,18 @@ def atr_scan_path(
             files_yielded += 1
             yield (fp, content)
 
-    result = atr_catalog.scan_contents(_iter_items())
+    result = atr_catalog.scan_contents(_iter_items(), deadline=deadline)
     if files_skipped_too_large:
         result["files_skipped_too_large"] = files_skipped_too_large
     if files_skipped_unreadable:
         result["files_skipped_unreadable"] = files_skipped_unreadable
-    if budget_exceeded_reason:
+    # The file-count budget is owned here; the time budget is owned by
+    # scan_contents (it sets budget_exceeded itself when the deadline trips).
+    if file_budget_exceeded and not result.get("budget_exceeded"):
         result["budget_exceeded"] = True
-        result["budget_reason"] = budget_exceeded_reason
+        result["budget_reason"] = (
+            f"file budget {file_budget} files exceeded — re-invoke on a narrower path"
+        )
     return result
 
 

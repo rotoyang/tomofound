@@ -186,6 +186,11 @@ that per-plugin calls would have spent productively. Walk the
 `discover_targets` output and call `atr_scan_path` once per distinct plugin /
 skill root.
 
+**MCP server serializes requests.** While an `atr_scan_path` call is in flight,
+no other tool call (including `atr_status`) can be served on the same server —
+the next call queues until the scan returns. Keep each `atr_scan_path` call
+small (one plugin/skill root, deadline 30s) so other tools stay responsive.
+
 The server walks the path, reads each file inside the MCP server, and runs the
 catalog against every body — file content never returns through the LLM. Returns
 `{files_scanned, files_with_findings, findings, rules_evaluated}` or
