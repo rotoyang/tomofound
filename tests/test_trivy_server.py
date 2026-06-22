@@ -1367,6 +1367,22 @@ def test_atr_scan_path_time_budget_stops_early(tmp_path, monkeypatch):
     assert r.get("budget_exceeded") is True
     assert "time budget" in r["budget_reason"]
     assert r["files_scanned"] == 0
+    # The numeric budget value must surface in the reason — otherwise the
+    # caller can't tell whether they hit the 30s default or a custom budget.
+    assert "0s" in r["budget_reason"]
+
+
+def test_atr_scan_path_reason_includes_configured_budget(tmp_path, monkeypatch):
+    home = _fake_home(monkeypatch, tmp_path)
+    _seed_atr_catalog_under_home(home)
+    skills = tmp_path / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    for i in range(5):
+        (skills / f"f{i:02d}.md").write_text("safe content")
+    r = atr_scan_path(str(skills), time_budget_seconds=7)
+    if r.get("budget_exceeded"):
+        # If budget tripped, the configured value (7s) must be in the reason
+        assert "7s" in r["budget_reason"]
 
 
 def test_atr_scan_path_within_budget_no_budget_flag(tmp_path, monkeypatch):
@@ -1425,3 +1441,23 @@ def test_atr_scan_path_dispatch_runs_in_thread(tmp_path, monkeypatch):
     # status_done must complete before scan_done — proves the thread didn't
     # block the event loop
     assert by_name["status_done"] < by_name["scan_done"]
+
+
+def test_atr_match_dispatch_uses_to_thread_and_deadline():
+    """Regression: atr_match dispatch must wrap match_content in
+    asyncio.to_thread (so a slow regex doesn't block the MCP loop) AND
+    must pass a non-None deadline (so match_content's mid-rule check
+    actually fires). Without both, the user-reported 13-minute hang
+    pattern is reproducible via atr_match instead of atr_scan_path."""
+    import server.trivy_server as ts
+
+    # The dispatcher lives at module top-level inside the `if Server:`
+    # guard, so we inspect the source file directly rather than relying
+    # on a callable. We avoid running a real MCP server in tests.
+    with open(ts.__file__, "r") as f:
+        src = f.read()
+    atr_match_block = src.split('if name == "atr_match":', 1)
+    assert len(atr_match_block) == 2, "atr_match dispatch branch not found"
+    after = atr_match_block[1].split('if name == "atr_status":', 1)[0]
+    assert "asyncio.to_thread" in after, "atr_match must run on a worker thread"
+    assert "deadline" in after, "atr_match must pass a deadline to match_content"

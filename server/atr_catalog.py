@@ -432,14 +432,24 @@ def catalog_status() -> dict:
         return {"available": False, "reason": f"catalog meta unreadable: {e}"}
 
 
-def match_content(content: str, file_hint: str | None = None) -> dict:
+def match_content(
+    content: str,
+    file_hint: str | None = None,
+    deadline: float | None = None,
+) -> dict:
     """Run the cached ATR catalog against `content`. Returns a dict with
     `findings` in tomofound's canonical shape, each with `provenance.source =
     "atr"` and the matched rule's metadata.
 
     The matcher is offline. If the catalog isn't cached yet, returns an
     empty findings list + a `catalog_missing` note. Scans must NEVER block
-    on this."""
+    on this.
+
+    `deadline` is an optional `time.monotonic()` value after which to bail
+    mid-iteration. Without it, a single catastrophic-backtracking ATR rule
+    can hang the call for arbitrary wall time — same failure mode the
+    batch `scan_contents` deadline fixes. Pass one from any caller that
+    cannot afford an unbounded hang (e.g. the `atr_match` MCP dispatch)."""
     catalog = _load_catalog()
     if catalog is None:
         return {
@@ -449,11 +459,15 @@ def match_content(content: str, file_hint: str | None = None) -> dict:
         }
     if not isinstance(content, str) or not content:
         return {"findings": [], "rules_evaluated": 0}
-    findings = _match_against_catalog(catalog, content, file_hint)
+    findings = _match_against_catalog(catalog, content, file_hint, deadline=deadline)
     return {"findings": findings, "rules_evaluated": len(catalog.get("rules", []))}
 
 
-def scan_contents(items, deadline: float | None = None) -> dict:
+def scan_contents(
+    items,
+    deadline: float | None = None,
+    time_budget_seconds: float | None = None,
+) -> dict:
     """Batch-match the ATR catalog against an iterable of (file_path, content)
     tuples. Loads the catalog once and reuses it across every item, which is
     the whole point of this helper — `match_content` reloads the catalog on
@@ -497,6 +511,12 @@ def scan_contents(items, deadline: float | None = None) -> dict:
     budget_exceeded = False
     budget_reason: str | None = None
 
+    budget_label = (
+        f"{time_budget_seconds:.0f}s "
+        if time_budget_seconds is not None
+        else ""
+    )
+
     for item in items:
         try:
             path, content = item
@@ -504,7 +524,10 @@ def scan_contents(items, deadline: float | None = None) -> dict:
             continue
         if deadline is not None and time.monotonic() >= deadline:
             budget_exceeded = True
-            budget_reason = "time budget exceeded between files — re-invoke on a narrower path"
+            budget_reason = (
+                f"time budget {budget_label}exceeded between files — "
+                f"re-invoke on a narrower path"
+            )
             break
         files_scanned += 1
         if not isinstance(content, str) or not content:
@@ -516,8 +539,8 @@ def scan_contents(items, deadline: float | None = None) -> dict:
         if deadline is not None and time.monotonic() >= deadline:
             budget_exceeded = True
             budget_reason = (
-                "time budget exceeded mid-file — likely a slow regex; "
-                "re-invoke on a narrower path"
+                f"time budget {budget_label}exceeded mid-file — likely a slow regex; "
+                f"re-invoke on a narrower path"
             )
             break
 
