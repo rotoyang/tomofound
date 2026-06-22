@@ -200,10 +200,28 @@ findings are listed; clean files are counted but not enumerated. This is the
 cheapest way to get ATR coverage on the ~1000s of vendor docs bundled inside
 official plugins.
 
-If `budget_exceeded: true` comes back, re-invoke on a narrower subdirectory or
-raise `time_budget_seconds` / `max_files` for that single call (only do this
-when you know the target tree is bounded — e.g. one large plugin you trust to
-not be a runaway symlink loop).
+If `budget_exceeded: true` comes back, the response carries only the partial
+findings collected before the budget tripped — `files_scanned` will be less
+than the actual number of files under that path, and the remaining files were
+never matched against the ATR catalog. Handle it by one of:
+
+1. **Preferred — re-invoke on narrower subpaths until every subtree has been
+   fully scanned.** Walk the parent directory yourself (e.g. via
+   `discover_targets` or `read_file` on the directory tail) and call
+   `atr_scan_path` once per child until every plugin / skill root underneath
+   has come back without `budget_exceeded`. Merge findings across calls.
+2. **Acceptable — raise `time_budget_seconds` / `max_files` for that single
+   call** (only when you know the target tree is bounded — e.g. one large
+   plugin you trust to not be a runaway symlink loop).
+3. **Last resort — render the affected item with explicit partial-coverage
+   marking.** If you cannot complete coverage, the per-item report section
+   for that path MUST include a `⚠️ Partial ATR coverage` note saying which
+   path tripped the budget, the `budget_reason`, and that the unscanned
+   portion was NOT pattern-matched against the ATR catalog. Do NOT silently
+   merge partial findings into the report as if coverage was complete.
+
+The `compute_risk_score` call should still see every finding you collected;
+the partial-coverage flag belongs in the per-item rendering, not in the score.
 
 **Fallback: per-content `atr_match`** — only when you've already loaded a file's
 content for LLM analysis and don't want a separate disk read, or when the content

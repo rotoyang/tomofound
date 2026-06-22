@@ -1045,7 +1045,11 @@ def atr_scan_path(
             files_yielded += 1
             yield (fp, content)
 
-    result = atr_catalog.scan_contents(_iter_items(), deadline=deadline)
+    result = atr_catalog.scan_contents(
+        _iter_items(),
+        deadline=deadline,
+        time_budget_seconds=time_budget,
+    )
     if files_skipped_too_large:
         result["files_skipped_too_large"] = files_skipped_too_large
     if files_skipped_unreadable:
@@ -1315,7 +1319,7 @@ if Server is not None:
             ),
             types.Tool(
                 name="atr_match",
-                description="Run the cached ATR regex catalog against scan-target content. Returns {findings, rules_evaluated} where each finding carries provenance.source='atr', rule_id, catalog_version, and upstream references (OWASP Agentic, MITRE ATLAS, CVE). Offline — never blocks on network. If the catalog isn't cached yet, returns {findings: [], catalog_missing: true} and the report header should advise the user to run atr_update.",
+                description="Run the cached ATR regex catalog against scan-target content. Returns {findings, rules_evaluated} where each finding carries provenance.source='atr', rule_id, catalog_version, and upstream references (OWASP Agentic, MITRE ATLAS, CVE). Offline — never blocks on network. Bounded by a 30-second wall-clock deadline by default so a single catastrophic-backtracking rule cannot hang the MCP server; override via time_budget_seconds. If the catalog isn't cached yet, returns {findings: [], catalog_missing: true} and the report header should advise the user to run atr_update.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1326,6 +1330,10 @@ if Server is not None:
                         "file_hint": {
                             "type": "string",
                             "description": "Optional path to attribute findings to — copied into each finding's `file` field for downstream report rendering.",
+                        },
+                        "time_budget_seconds": {
+                            "type": "number",
+                            "description": "Wall-clock budget in seconds for this single match. Default 30. Stops between rules once exceeded; partial findings are returned.",
                         },
                     },
                     "required": ["content"],
@@ -1496,10 +1504,26 @@ if Server is not None:
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "atr_match":
-            result = atr_catalog.match_content(
-                content=arguments.get("content") or "",
-                file_hint=arguments.get("file_hint"),
+            # A single ATR rule's regex can hit catastrophic backtracking on
+            # adversarial content and burn arbitrary wall time inside
+            # re.search. Apply the same defenses we use for atr_scan_path:
+            # bound the call with a deadline, and run on a worker thread so
+            # the MCP event loop stays responsive to concurrent calls.
+            time_budget = float(
+                arguments.get("time_budget_seconds")
+                or _ATR_SCAN_DEFAULT_TIME_BUDGET
             )
+            import time as _time
+            deadline = _time.monotonic() + time_budget
+
+            def _run_match():
+                return atr_catalog.match_content(
+                    content=arguments.get("content") or "",
+                    file_hint=arguments.get("file_hint"),
+                    deadline=deadline,
+                )
+
+            result = await asyncio.to_thread(_run_match)
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "atr_status":
