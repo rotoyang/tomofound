@@ -1612,3 +1612,84 @@ def test_scan_all_scans_dir_with_lockfile(tmp_path):
     session = _scan_sessions[result["scan_id"]]
     assert session["findings"][0]["category"] == "SUPPLY_CHAIN"
     assert session["findings"][0]["severity"] == "high"
+
+
+# --- skip tracking ---
+
+def test_store_findings_records_skipped():
+    result = store_findings(
+        scan_id="skip-1",
+        findings=[{"severity": "low"}],
+        skipped=[{"target": "plugin-x", "reason": "timeout", "phase": "ATR scan"}],
+        source="test",
+    )
+    assert result["total_skipped"] == 1
+    session = _scan_sessions["skip-1"]
+    assert len(session["skipped"]) == 1
+    assert session["skipped"][0]["target"] == "plugin-x"
+    assert session["skipped"][0]["reason"] == "timeout"
+
+
+def test_store_findings_skipped_gets_source_default():
+    store_findings(
+        scan_id="skip-src",
+        skipped=[{"reason": "budget exceeded"}],
+        source="my-plugin",
+    )
+    session = _scan_sessions["skip-src"]
+    assert session["skipped"][0]["source"] == "my-plugin"
+
+
+def test_scan_all_records_skipped_for_trivy_unavailable(tmp_path):
+    (tmp_path / "package-lock.json").write_text("{}")
+    with patch("server.trivy_server.find_or_install_trivy", return_value=None):
+        result = scan_all(paths=[{"path": str(tmp_path), "label": "no-trivy-plugin"}])
+    assert result["directories_skipped"] == 1
+    session = _scan_sessions[result["scan_id"]]
+    assert len(session["skipped"]) == 1
+    assert session["skipped"][0]["target"] == "no-trivy-plugin"
+    assert "unavailable" in session["skipped"][0]["reason"].lower()
+
+
+def test_generate_report_md_includes_skipped_section():
+    store_findings(scan_id="rpt-skip", findings=[
+        {"category": "BACKDOOR", "severity": "high", "file": "x.py",
+         "line": 1, "description": "eval", "detected_by": "AST", "source": "p1"},
+    ], skipped=[
+        {"target": "plugin-timeout", "reason": "Trivy timed out after 120s", "phase": "Trivy CVE scan"},
+        {"target": "plugin-denied", "reason": "permission denied by user", "phase": "LLM analysis"},
+    ])
+    result = generate_report(scan_id="rpt-skip", formats=["md"])
+    assert result.get("total_skipped") == 2
+    md_path = result["files"][0]["path"]
+    with open(md_path) as f:
+        content = f.read()
+    assert "Incomplete Scans" in content
+    assert "plugin-timeout" in content
+    assert "Trivy timed out" in content
+    assert "plugin-denied" in content
+
+
+def test_generate_report_json_includes_skipped():
+    store_findings(scan_id="rpt-skip-j", findings=[], skipped=[
+        {"target": "x", "reason": "budget exceeded", "phase": "ATR scan"},
+    ])
+    result = generate_report(scan_id="rpt-skip-j", formats=["json"])
+    json_path = result["files"][0]["path"]
+    with open(json_path) as f:
+        data = json.load(f)
+    assert len(data["skipped"]) == 1
+    assert data["skipped"][0]["target"] == "x"
+
+
+def test_generate_report_no_skipped_section_when_empty():
+    store_findings(scan_id="rpt-noskip", findings=[
+        {"category": "SECRET_LEAKAGE", "severity": "low", "file": "a.txt",
+         "description": "test", "detected_by": "LLM", "source": "clean"},
+    ])
+    result = generate_report(scan_id="rpt-noskip", formats=["md"])
+    md_path = result["files"][0]["path"]
+    with open(md_path) as f:
+        content = f.read()
+    assert "Incomplete Scans" not in content
+    assert "total_skipped" not in result

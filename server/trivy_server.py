@@ -824,22 +824,29 @@ def _generate_scan_id() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d-%H-%M")
 
 
-def store_findings(
-    scan_id: str | None = None,
-    findings: list | None = None,
-    source: str | None = None,
-) -> dict:
-    if scan_id is None:
-        scan_id = _generate_scan_id()
-
+def _init_session(scan_id: str) -> dict:
     if scan_id not in _scan_sessions:
         _scan_sessions[scan_id] = {
             "scan_id": scan_id,
             "findings": [],
+            "skipped": [],
             "created_at": datetime.datetime.now().isoformat(),
         }
-
     session = _scan_sessions[scan_id]
+    session.setdefault("skipped", [])
+    return session
+
+
+def store_findings(
+    scan_id: str | None = None,
+    findings: list | None = None,
+    source: str | None = None,
+    skipped: list | None = None,
+) -> dict:
+    if scan_id is None:
+        scan_id = _generate_scan_id()
+
+    session = _init_session(scan_id)
     batch = list(findings or [])
 
     if source:
@@ -848,10 +855,17 @@ def store_findings(
 
     session["findings"].extend(batch)
 
+    skip_batch = list(skipped or [])
+    if source:
+        for s in skip_batch:
+            s.setdefault("source", source)
+    session["skipped"].extend(skip_batch)
+
     return {
         "scan_id": scan_id,
         "batch_size": len(batch),
         "total_stored": len(session["findings"]),
+        "total_skipped": len(session["skipped"]),
     }
 
 
@@ -865,7 +879,7 @@ _SEVERITY_BADGE = {
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
-def _render_markdown_report(findings: list, metadata: dict) -> str:
+def _render_markdown_report(findings: list, metadata: dict, skipped: list | None = None) -> str:
     now = datetime.datetime.now()
     title = metadata.get("title", f"Security Scan Report — {now.strftime('%Y-%m-%d %H:%M')}")
 
@@ -989,6 +1003,23 @@ def _render_markdown_report(findings: list, metadata: dict) -> str:
         lines.append("---")
         lines.append("")
 
+    skipped_items = skipped or []
+    if skipped_items:
+        lines.append("## ⚠️ Incomplete Scans")
+        lines.append("")
+        lines.append("The following targets were expected but not fully scanned.")
+        lines.append("")
+        lines.append("| Target | Reason | Phase |")
+        lines.append("|--------|--------|-------|")
+        for s in skipped_items:
+            target = s.get("target") or s.get("path") or s.get("source") or "unknown"
+            reason = s.get("reason", "unknown")
+            phase = s.get("phase", "—")
+            lines.append(f"| `{target}` | {reason} | {phase} |")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     recommendations = metadata.get("recommendations", [])
     if recommendations:
         lines.append("## 🔑 Top Recommendations")
@@ -1010,6 +1041,7 @@ def generate_report(
 
     session = _scan_sessions[scan_id]
     findings = session["findings"]
+    skipped = session.get("skipped", [])
     formats = formats or ["md", "json", "sarif"]
     metadata = metadata or {}
 
@@ -1021,20 +1053,23 @@ def generate_report(
     files_written: list[dict] = []
 
     if "md" in formats:
-        md_content = _render_markdown_report(findings, metadata)
+        md_content = _render_markdown_report(findings, metadata, skipped=skipped)
         md_path = os.path.join(REPORTS_DIR, f"{base_name}.md")
         result = write_file(md_path, md_content)
         if result.get("ok"):
             files_written.append({"path": md_path, "format": "md", "size_bytes": result["size_bytes"]})
 
     if "json" in formats:
-        json_content = json.dumps({
+        json_report: dict = {
             "scan_id": scan_id,
             "generated_at": now.isoformat(),
             "risk_score": risk_score,
             "findings": findings,
             "metadata": {k: v for k, v in metadata.items() if k != "catalogs"},
-        }, indent=2)
+        }
+        if skipped:
+            json_report["skipped"] = skipped
+        json_content = json.dumps(json_report, indent=2)
         json_path = os.path.join(REPORTS_DIR, f"{base_name}.json")
         result = write_file(json_path, json_content)
         if result.get("ok"):
@@ -1048,13 +1083,16 @@ def generate_report(
         if result.get("ok"):
             files_written.append({"path": sarif_path, "format": "sarif", "size_bytes": result["size_bytes"]})
 
-    return {
+    result_payload: dict = {
         "scan_id": scan_id,
         "files": files_written,
         "risk_score": risk_score,
         "summary_counts": risk_score["counts"],
         "total_findings": len(findings),
     }
+    if skipped:
+        result_payload["total_skipped"] = len(skipped)
+    return result_payload
 
 
 def scan_all(
@@ -1067,14 +1105,7 @@ def scan_all(
     if scan_id is None:
         scan_id = _generate_scan_id()
 
-    if scan_id not in _scan_sessions:
-        _scan_sessions[scan_id] = {
-            "scan_id": scan_id,
-            "findings": [],
-            "created_at": datetime.datetime.now().isoformat(),
-        }
-
-    session = _scan_sessions[scan_id]
+    session = _init_session(scan_id)
     per_directory: list[dict] = []
     total_findings = 0
     dirs_scanned = 0
@@ -1092,11 +1123,13 @@ def scan_all(
 
         if not path or not _is_safe_root(path):
             per_directory.append({"path": path, "label": label, "finding_count": 0, "skipped_reason": "path_not_permitted"})
+            session["skipped"].append({"target": label, "reason": "path not permitted", "phase": "Trivy CVE scan"})
             dirs_skipped += 1
             continue
 
         if not os.path.isdir(path):
             per_directory.append({"path": path, "label": label, "finding_count": 0, "skipped_reason": "not_a_directory"})
+            session["skipped"].append({"target": label, "reason": "not a directory", "phase": "Trivy CVE scan"})
             dirs_skipped += 1
             continue
 
@@ -1105,6 +1138,7 @@ def scan_all(
 
         if not trivy:
             per_directory.append({"path": path, "label": label, "finding_count": 0, "skipped_reason": "trivy_unavailable", "scan_level": level, "scan_level_desc": level_desc})
+            session["skipped"].append({"target": label, "reason": "Trivy unavailable", "phase": "Trivy CVE scan"})
             dirs_skipped += 1
             continue
 
@@ -1731,7 +1765,7 @@ if Server is not None:
             ),
             types.Tool(
                 name="store_findings",
-                description="Accumulate findings on the server side so they never need to live in LLM context. Call once per analysis batch (Trivy results, LLM findings, ATR matches). Returns {scan_id, batch_size, total_stored} — counts only, never the data. Use with generate_report to produce reports from accumulated findings.",
+                description="Accumulate findings and skipped-target records on the server side so they never need to live in LLM context. Call once per analysis batch (Trivy results, LLM findings, ATR matches). Returns {scan_id, batch_size, total_stored, total_skipped} — counts only, never the data. Use with generate_report to produce reports from accumulated findings. Pass `skipped` to record targets that were expected but not fully scanned (timeout, permission denied, budget exceeded, etc.).",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1747,6 +1781,11 @@ if Server is not None:
                         "source": {
                             "type": "string",
                             "description": "Label for grouping in reports (e.g. 'claude-plugins-official/telegram', 'skills'). Applied as default source to findings that don't already have one.",
+                        },
+                        "skipped": {
+                            "type": "array",
+                            "description": "Targets that were expected but not fully scanned. Each item: {target, reason, phase}. Example: {target: 'my-plugin', reason: 'ATR budget exceeded', phase: 'ATR scan'}. These appear in the report's 'Incomplete Scans' section.",
+                            "items": {"type": "object"},
                         },
                     },
                 },
@@ -1973,6 +2012,7 @@ if Server is not None:
                 scan_id=arguments.get("scan_id"),
                 findings=arguments.get("findings"),
                 source=arguments.get("source"),
+                skipped=arguments.get("skipped"),
             )
             return [types.TextContent(type="text", text=json.dumps(result))]
 
