@@ -54,7 +54,7 @@ def _bootstrap():
 if __name__ == "__main__":
     _bootstrap()
 
-import subprocess, json, shutil, platform, urllib.request, urllib.error, tempfile, re, zipfile, ipaddress, socket
+import subprocess, json, shutil, platform, urllib.request, urllib.error, tempfile, re, zipfile, ipaddress, socket, datetime
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -813,6 +813,355 @@ def catalogs_status() -> dict:
     }
 
 
+# --- Server-side scan session store ----------------------------------------
+# In-memory accumulator so findings stay on the server, not in LLM context.
+# Sessions are ephemeral — lost when the MCP server process exits.
+
+_scan_sessions: dict[str, dict] = {}
+
+
+def _generate_scan_id() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d-%H-%M")
+
+
+def store_findings(
+    scan_id: str | None = None,
+    findings: list | None = None,
+    source: str | None = None,
+) -> dict:
+    if scan_id is None:
+        scan_id = _generate_scan_id()
+
+    if scan_id not in _scan_sessions:
+        _scan_sessions[scan_id] = {
+            "scan_id": scan_id,
+            "findings": [],
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+
+    session = _scan_sessions[scan_id]
+    batch = list(findings or [])
+
+    if source:
+        for f in batch:
+            f.setdefault("source", source)
+
+    session["findings"].extend(batch)
+
+    return {
+        "scan_id": scan_id,
+        "batch_size": len(batch),
+        "total_stored": len(session["findings"]),
+    }
+
+
+_SEVERITY_BADGE = {
+    "critical": "🔴 Critical",
+    "high": "🟠 High",
+    "medium": "⚠️ Medium",
+    "low": "🔵 Low",
+}
+
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _render_markdown_report(findings: list, metadata: dict) -> str:
+    now = datetime.datetime.now()
+    title = metadata.get("title", f"Security Scan Report — {now.strftime('%Y-%m-%d %H:%M')}")
+
+    score_data = compute_risk_score(findings)
+    counts = score_data["counts"]
+
+    by_source: dict[str, list] = {}
+    for f in findings:
+        src = f.get("source", "unknown")
+        by_source.setdefault(src, [])
+        by_source[src].append(f)
+
+    for src in by_source:
+        by_source[src].sort(key=lambda f: _SEVERITY_ORDER.get(f.get("severity", "low"), 3))
+
+    lines: list[str] = []
+    lines.append(f"# 🛡 {title}")
+    lines.append("")
+
+    catalogs = metadata.get("catalogs", [])
+    if catalogs:
+        lines.append("**📦 Catalogs**")
+        for cat in catalogs:
+            if cat.get("available"):
+                ver = cat.get("binary_version") or cat.get("version") or cat.get("pin") or ""
+                if ver:
+                    ver = f" v{ver}" if not ver.startswith("v") else f" {ver}"
+                extra_parts = []
+                if cat.get("rules_compiled"):
+                    extra_parts.append(f"{cat['rules_compiled']} rules")
+                if cat.get("db_updated_at"):
+                    extra_parts.append(f"DB updated {str(cat['db_updated_at'])[:10]}")
+                extra = f", {', '.join(extra_parts)}" if extra_parts else ""
+                lic = f" ({cat.get('license', '')})" if cat.get("license") else ""
+                attr = f" — {cat['attribution']}" if cat.get("attribution") else ""
+                lines.append(f"✅ {cat.get('name', cat.get('source', ''))}{ver}{extra}{lic}{attr}")
+            else:
+                lines.append(f"❌ {cat.get('name', cat.get('source', ''))} — unavailable")
+        lines.append("")
+
+    scan_stats = metadata.get("scan_stats", "")
+    if scan_stats:
+        lines.append(f"**Scanned:** {scan_stats}")
+    mode = metadata.get("mode", "")
+    if mode:
+        lines.append(f"**Mode:** {mode}")
+    lines.append("")
+
+    lines.append(f"**Overall risk score:** `{score_data['score']}/100` — {score_data['badge']} — {score_data['description']}")
+    lines.append("")
+
+    context_note = metadata.get("context_note", "")
+    if context_note:
+        lines.append(f"> {context_note}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+
+    lines.append("## Summary")
+    lines.append("")
+    lines.append("| Severity | Count |")
+    lines.append("|----------|-------|")
+    lines.append(f"| 🔴 Critical | {counts['critical']} |")
+    lines.append(f"| 🟠 High | {counts['high']} |")
+    lines.append(f"| ⚠️ Medium | {counts['medium']} |")
+    lines.append(f"| 🔵 Low | {counts['low']} |")
+
+    sources_with_findings = [s for s in by_source if by_source[s]]
+    clean_count = len(by_source) - len(sources_with_findings)
+    if clean_count > 0:
+        lines.append(f"| ✅ Clean | {clean_count} items |")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    lines.append("## Results")
+    lines.append("")
+
+    def source_max_severity(src):
+        fs = by_source.get(src, [])
+        if not fs:
+            return 4
+        return min(_SEVERITY_ORDER.get(f.get("severity", "low"), 3) for f in fs)
+
+    sorted_sources = sorted(by_source.keys(), key=source_max_severity)
+
+    for src in sorted_sources:
+        src_findings = by_source[src]
+        if not src_findings:
+            lines.append(f"### {src} — ✅ CLEAN")
+            lines.append("")
+            continue
+
+        src_score = compute_risk_score(src_findings)
+        max_sev = src_findings[0].get("severity", "low")
+        badge = _SEVERITY_BADGE.get(max_sev, "🔵 Low")
+        lines.append(f"### {src} — {badge.split(' ')[0]} {max_sev.upper()} (score {src_score['score']}/100)")
+        lines.append("")
+
+        for f in src_findings:
+            cat = f.get("category", "UNKNOWN")
+            sev = f.get("severity", "medium")
+            file_path = f.get("file", "")
+            line_num = f.get("line", 0)
+            desc = f.get("description", "")
+            snippet = f.get("snippet", "")
+            detected = f.get("detected_by", "")
+
+            loc = file_path
+            if isinstance(line_num, int) and line_num > 0:
+                loc = f"{file_path}:{line_num}"
+
+            lines.append(f"**[{cat}]** `{loc}` — {desc}")
+            if snippet:
+                lines.append(f"> `{snippet}`")
+            lines.append(f"- Severity: {_SEVERITY_BADGE.get(sev, sev)} | Detected by: {detected}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    recommendations = metadata.get("recommendations", [])
+    if recommendations:
+        lines.append("## 🔑 Top Recommendations")
+        lines.append("")
+        for i, rec in enumerate(recommendations, 1):
+            lines.append(f"{i}. {rec}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def generate_report(
+    scan_id: str,
+    formats: list | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    if scan_id not in _scan_sessions:
+        return {"error": f"scan session '{scan_id}' not found"}
+
+    session = _scan_sessions[scan_id]
+    findings = session["findings"]
+    formats = formats or ["md", "json", "sarif"]
+    metadata = metadata or {}
+
+    now = datetime.datetime.now()
+    base_name = now.strftime("%Y-%m-%d-%H-%M")
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+
+    risk_score = compute_risk_score(findings)
+    files_written: list[dict] = []
+
+    if "md" in formats:
+        md_content = _render_markdown_report(findings, metadata)
+        md_path = os.path.join(REPORTS_DIR, f"{base_name}.md")
+        result = write_file(md_path, md_content)
+        if result.get("ok"):
+            files_written.append({"path": md_path, "format": "md", "size_bytes": result["size_bytes"]})
+
+    if "json" in formats:
+        json_content = json.dumps({
+            "scan_id": scan_id,
+            "generated_at": now.isoformat(),
+            "risk_score": risk_score,
+            "findings": findings,
+            "metadata": {k: v for k, v in metadata.items() if k != "catalogs"},
+        }, indent=2)
+        json_path = os.path.join(REPORTS_DIR, f"{base_name}.json")
+        result = write_file(json_path, json_content)
+        if result.get("ok"):
+            files_written.append({"path": json_path, "format": "json", "size_bytes": result["size_bytes"]})
+
+    if "sarif" in formats:
+        sarif_data = to_sarif(findings, scan_root=metadata.get("scan_root"))
+        sarif_content = json.dumps(sarif_data, indent=2)
+        sarif_path = os.path.join(REPORTS_DIR, f"{base_name}.sarif")
+        result = write_file(sarif_path, sarif_content)
+        if result.get("ok"):
+            files_written.append({"path": sarif_path, "format": "sarif", "size_bytes": result["size_bytes"]})
+
+    return {
+        "scan_id": scan_id,
+        "files": files_written,
+        "risk_score": risk_score,
+        "summary_counts": risk_score["counts"],
+        "total_findings": len(findings),
+    }
+
+
+def scan_all(
+    paths: list,
+    scanners: list | None = None,
+    scan_id: str | None = None,
+) -> dict:
+    scanners = scanners or ["vuln", "secret"]
+
+    if scan_id is None:
+        scan_id = _generate_scan_id()
+
+    if scan_id not in _scan_sessions:
+        _scan_sessions[scan_id] = {
+            "scan_id": scan_id,
+            "findings": [],
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+
+    session = _scan_sessions[scan_id]
+    per_directory: list[dict] = []
+    total_findings = 0
+    dirs_scanned = 0
+    dirs_skipped = 0
+
+    for entry in paths:
+        if isinstance(entry, str):
+            path = entry
+            label = entry
+        elif isinstance(entry, dict):
+            path = entry.get("path", "")
+            label = entry.get("label", path)
+        else:
+            continue
+
+        if not path or not _is_safe_root(path):
+            per_directory.append({"path": path, "label": label, "finding_count": 0, "skipped_reason": "path_not_permitted"})
+            dirs_skipped += 1
+            continue
+
+        if not os.path.isdir(path):
+            per_directory.append({"path": path, "label": label, "finding_count": 0, "skipped_reason": "not_a_directory"})
+            dirs_skipped += 1
+            continue
+
+        trivy = find_or_install_trivy()
+        level, level_desc = detect_scan_level(path)
+
+        if not trivy:
+            per_directory.append({"path": path, "label": label, "finding_count": 0, "skipped_reason": "trivy_unavailable", "scan_level": level, "scan_level_desc": level_desc})
+            dirs_skipped += 1
+            continue
+
+        if level == 5:
+            per_directory.append({"path": path, "label": label, "finding_count": 0, "skipped_reason": "no_dependency_info", "scan_level": 5, "scan_level_desc": level_desc})
+            dirs_skipped += 1
+            continue
+
+        scan_path = path
+        scan_scanners = list(scanners)
+        if level == 3:
+            scan_path = os.path.join(path, "node_modules")
+            scan_scanners = ["vuln"]
+
+        try:
+            proc = subprocess.run(
+                [trivy, "fs", scan_path,
+                 "--scanners", ",".join(scan_scanners),
+                 "--format", "json", "--quiet"],
+                capture_output=True, text=True, timeout=120,
+            )
+            try:
+                trivy_results = json.loads(proc.stdout) if proc.stdout.strip() else {}
+            except json.JSONDecodeError:
+                trivy_results = {}
+        except Exception:
+            trivy_results = {}
+
+        normalized = normalize_trivy(trivy_results)
+        dir_findings = normalized.get("findings", [])
+
+        for f in dir_findings:
+            f["source"] = label
+
+        session["findings"].extend(dir_findings)
+        finding_count = len(dir_findings)
+        total_findings += finding_count
+        dirs_scanned += 1
+
+        per_directory.append({
+            "path": path,
+            "label": label,
+            "finding_count": finding_count,
+            "skipped_reason": None,
+            "scan_level": level,
+            "scan_level_desc": level_desc,
+        })
+
+    return {
+        "scan_id": scan_id,
+        "directories_scanned": dirs_scanned,
+        "directories_skipped": dirs_skipped,
+        "total_findings": total_findings,
+        "per_directory": per_directory,
+    }
+
+
 def to_sarif(findings: list, scan_root: str | None = None) -> dict:
     rules: dict[str, dict] = {}
     results = []
@@ -1381,6 +1730,75 @@ if Server is not None:
                 },
             ),
             types.Tool(
+                name="store_findings",
+                description="Accumulate findings on the server side so they never need to live in LLM context. Call once per analysis batch (Trivy results, LLM findings, ATR matches). Returns {scan_id, batch_size, total_stored} — counts only, never the data. Use with generate_report to produce reports from accumulated findings.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "scan_id": {
+                            "type": "string",
+                            "description": "Session identifier. Omit on first call to auto-generate; reuse the returned scan_id for subsequent batches.",
+                        },
+                        "findings": {
+                            "type": "array",
+                            "description": "Batch of findings in canonical shape (category, severity, file, line, description, snippet, detected_by).",
+                            "items": {"type": "object"},
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Label for grouping in reports (e.g. 'claude-plugins-official/telegram', 'skills'). Applied as default source to findings that don't already have one.",
+                        },
+                    },
+                },
+            ),
+            types.Tool(
+                name="generate_report",
+                description="Generate scan reports (md/json/sarif) from server-side accumulated findings. Pulls all findings stored via store_findings for the given scan_id, computes risk score, renders markdown with catalogs/summary/per-source sections, and writes files to ~/.tomofound/reports/. Returns {files, risk_score, summary_counts, total_findings} — file paths and stats, never the full report content. Pass catalogs, context_note, recommendations, scan_stats, and mode via metadata to populate report sections.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "scan_id": {
+                            "type": "string",
+                            "description": "Session identifier from store_findings or scan_all.",
+                        },
+                        "formats": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["md", "json", "sarif"]},
+                            "description": "Report formats to generate. Default: all three.",
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "description": "Report metadata: title, catalogs (array from catalogs_status), scan_stats (string), mode (string), context_note (string), recommendations (array of strings), scan_root (string).",
+                        },
+                    },
+                    "required": ["scan_id"],
+                },
+            ),
+            types.Tool(
+                name="scan_all",
+                description="Batch Trivy scan: run scan_directory + normalize_trivy for every directory in one server-side call, storing all findings directly in the session — no raw Trivy JSON ever enters LLM context. Each path can be a string or {path, label}. Returns {scan_id, directories_scanned, directories_skipped, total_findings, per_directory: [{path, label, finding_count, skipped_reason, scan_level}]}. Combine with store_findings (for LLM/ATR findings) and generate_report to complete a scan without context overflow.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "description": "Directories to scan. Each item is either an absolute path string or {path, label} where label is used for report grouping.",
+                            "items": {},
+                        },
+                        "scanners": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Scanners to use: vuln, secret (default: both).",
+                        },
+                        "scan_id": {
+                            "type": "string",
+                            "description": "Session identifier. Omit to auto-generate; pass an existing scan_id to append to that session.",
+                        },
+                    },
+                    "required": ["paths"],
+                },
+            ),
+            types.Tool(
                 name="compute_risk_score",
                 description="Deterministically compute the 0-100 risk score and install recommendation from a list of findings. Severity weights: critical=25, high=10, medium=3, low=1, capped at 100. Recommendation bands: 0=SAFE, 1-15=CAUTION, 16-50=HIGH_RISK, 51-100=AVOID. Returns {score, raw_score, capped, recommendation, badge, description, counts:{critical,high,medium,low,total}, weights}. Use this instead of summing weights by hand so the score never drifts between runs.",
                 inputSchema={
@@ -1547,6 +1965,31 @@ if Server is not None:
                 extensions=arguments.get("extensions"),
                 time_budget_seconds=arguments.get("time_budget_seconds"),
                 max_files=arguments.get("max_files"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "store_findings":
+            result = store_findings(
+                scan_id=arguments.get("scan_id"),
+                findings=arguments.get("findings"),
+                source=arguments.get("source"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "generate_report":
+            result = generate_report(
+                scan_id=arguments["scan_id"],
+                formats=arguments.get("formats"),
+                metadata=arguments.get("metadata"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "scan_all":
+            result = await asyncio.to_thread(
+                scan_all,
+                paths=arguments["paths"],
+                scanners=arguments.get("scanners"),
+                scan_id=arguments.get("scan_id"),
             )
             return [types.TextContent(type="text", text=json.dumps(result))]
 

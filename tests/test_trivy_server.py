@@ -10,6 +10,8 @@ from server.trivy_server import (
     _WRITE_ALLOWED_PREFIXES, CLONE_PREFIX, TOOLS_DIR,
     render_prompt, _strip_frontmatter, _load_prompt_source, _PROMPT_NAME,
     extract_zip, to_sarif, ZIP_MEMBER_LIMIT,
+    store_findings, generate_report, scan_all, _scan_sessions, compute_risk_score,
+    normalize_trivy, REPORTS_DIR,
 )
 
 
@@ -1461,3 +1463,152 @@ def test_atr_match_dispatch_uses_to_thread_and_deadline():
     after = atr_match_block[1].split('if name == "atr_status":', 1)[0]
     assert "asyncio.to_thread" in after, "atr_match must run on a worker thread"
     assert "deadline" in after, "atr_match must pass a deadline to match_content"
+
+
+# --- store_findings ---
+
+@pytest.fixture(autouse=True)
+def _clear_sessions():
+    _scan_sessions.clear()
+    yield
+    _scan_sessions.clear()
+
+
+def test_store_findings_auto_generates_scan_id():
+    result = store_findings(findings=[{"severity": "high", "category": "BACKDOOR"}])
+    assert "scan_id" in result
+    assert result["batch_size"] == 1
+    assert result["total_stored"] == 1
+
+
+def test_store_findings_reuses_scan_id():
+    r1 = store_findings(scan_id="test-1", findings=[{"severity": "high"}])
+    r2 = store_findings(scan_id="test-1", findings=[{"severity": "low"}, {"severity": "medium"}])
+    assert r1["scan_id"] == "test-1"
+    assert r2["scan_id"] == "test-1"
+    assert r2["total_stored"] == 3
+    assert r2["batch_size"] == 2
+
+
+def test_store_findings_tags_source():
+    store_findings(scan_id="test-src", findings=[{"severity": "high"}], source="my-plugin")
+    session = _scan_sessions["test-src"]
+    assert session["findings"][0]["source"] == "my-plugin"
+
+
+def test_store_findings_preserves_existing_source():
+    store_findings(
+        scan_id="test-src2",
+        findings=[{"severity": "high", "source": "existing"}],
+        source="override",
+    )
+    session = _scan_sessions["test-src2"]
+    assert session["findings"][0]["source"] == "existing"
+
+
+def test_store_findings_empty_batch():
+    result = store_findings(scan_id="test-empty", findings=[])
+    assert result["batch_size"] == 0
+    assert result["total_stored"] == 0
+
+
+# --- generate_report ---
+
+def test_generate_report_missing_session():
+    result = generate_report(scan_id="nonexistent")
+    assert "error" in result
+
+
+def test_generate_report_produces_files():
+    store_findings(scan_id="rpt-1", findings=[
+        {"category": "SUPPLY_CHAIN", "severity": "high", "file": "pkg.json",
+         "line": 1, "description": "CVE-123", "snippet": "lodash@4.0", "detected_by": "Trivy", "source": "my-plugin"},
+    ])
+    result = generate_report(scan_id="rpt-1", formats=["md", "json", "sarif"])
+    assert "error" not in result
+    assert result["total_findings"] == 1
+    assert result["risk_score"]["score"] == 10
+    assert len(result["files"]) == 3
+    formats_written = {f["format"] for f in result["files"]}
+    assert formats_written == {"md", "json", "sarif"}
+    for f in result["files"]:
+        assert os.path.isfile(f["path"])
+        assert f["size_bytes"] > 0
+
+
+def test_generate_report_md_contains_finding():
+    store_findings(scan_id="rpt-md", findings=[
+        {"category": "BACKDOOR", "severity": "critical", "file": "evil.py",
+         "line": 42, "description": "eval() call", "snippet": "eval(x)", "detected_by": "AST", "source": "bad-plugin"},
+    ])
+    result = generate_report(scan_id="rpt-md", formats=["md"], metadata={
+        "title": "Test Report",
+        "context_note": "This is a test.",
+        "recommendations": ["Remove eval()"],
+    })
+    md_path = result["files"][0]["path"]
+    with open(md_path) as f:
+        content = f.read()
+    assert "Test Report" in content
+    assert "BACKDOOR" in content
+    assert "eval() call" in content
+    assert "This is a test." in content
+    assert "Remove eval()" in content
+
+
+def test_generate_report_single_format():
+    store_findings(scan_id="rpt-sarif", findings=[
+        {"category": "SECRET_LEAKAGE", "severity": "medium", "file": "config.json",
+         "line": 5, "description": "API key", "detected_by": "LLM", "source": "cfg"},
+    ])
+    result = generate_report(scan_id="rpt-sarif", formats=["sarif"])
+    assert len(result["files"]) == 1
+    assert result["files"][0]["format"] == "sarif"
+
+
+# --- scan_all ---
+
+def test_scan_all_skips_nonexistent_path():
+    result = scan_all(paths=["/nonexistent/path/that/does/not/exist"])
+    assert result["directories_skipped"] == 1
+    assert result["directories_scanned"] == 0
+
+
+def test_scan_all_handles_empty_dir(tmp_path):
+    result = scan_all(paths=[str(tmp_path)])
+    assert result["directories_skipped"] == 1
+    per = result["per_directory"][0]
+    assert per["skipped_reason"] == "no_dependency_info"
+
+
+def test_scan_all_with_label(tmp_path):
+    result = scan_all(paths=[{"path": str(tmp_path), "label": "test-plugin"}])
+    per = result["per_directory"][0]
+    assert per["label"] == "test-plugin"
+
+
+def test_scan_all_reuses_scan_id():
+    store_findings(scan_id="existing", findings=[{"severity": "low"}])
+    result = scan_all(paths=[], scan_id="existing")
+    assert result["scan_id"] == "existing"
+    assert _scan_sessions["existing"]["findings"][0]["severity"] == "low"
+
+
+def test_scan_all_scans_dir_with_lockfile(tmp_path):
+    (tmp_path / "package-lock.json").write_text("{}")
+    with patch("server.trivy_server.find_or_install_trivy", return_value="/usr/local/bin/trivy"), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            stdout=json.dumps({"Results": [{"Target": "package-lock.json", "Vulnerabilities": [
+                {"VulnerabilityID": "CVE-2099-0001", "PkgName": "foo", "InstalledVersion": "1.0",
+                 "Severity": "HIGH", "Title": "Test vuln"}
+            ], "Secrets": [], "Misconfigurations": []}]}),
+            stderr="",
+            returncode=0,
+        )
+        result = scan_all(paths=[str(tmp_path)])
+    assert result["directories_scanned"] == 1
+    assert result["total_findings"] == 1
+    session = _scan_sessions[result["scan_id"]]
+    assert session["findings"][0]["category"] == "SUPPLY_CHAIN"
+    assert session["findings"][0]["severity"] == "high"
