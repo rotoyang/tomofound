@@ -1857,57 +1857,68 @@ if Server is not None:
     @_server.call_tool()
     async def _call_tool(name: str, arguments: dict):
         if name == "scan_directory":
-            path = arguments["path"]
-            scanners = arguments.get("scanners", ["vuln", "secret"])
-            if not _is_safe_root(path):
-                payload = {"trivy_available": False, "results": None,
-                           "skipped_reason": "path_not_permitted",
-                           "scan_level": None, "scan_level_desc": "path not permitted"}
-                return [types.TextContent(type="text", text=json.dumps(payload))]
-            trivy = find_or_install_trivy()
-            level, level_desc = detect_scan_level(path)
+            # subprocess.run(trivy ...) blocks for up to 120s; find_or_install_trivy
+            # may also download the binary on first call. Run the whole body on a
+            # worker thread so the MCP event loop stays responsive to concurrent
+            # calls (atr_status, catalogs_status, ...) on the same server.
+            def _run_scan_directory():
+                path = arguments["path"]
+                scanners = arguments.get("scanners", ["vuln", "secret"])
+                if not _is_safe_root(path):
+                    return {"trivy_available": False, "results": None,
+                            "skipped_reason": "path_not_permitted",
+                            "scan_level": None, "scan_level_desc": "path not permitted"}
+                trivy = find_or_install_trivy()
+                level, level_desc = detect_scan_level(path)
 
-            if not trivy:
-                payload = {"trivy_available": False, "results": None,
-                           "skipped_reason": "trivy_unavailable",
-                           "scan_level": level, "scan_level_desc": level_desc}
-                return [types.TextContent(type="text", text=json.dumps(payload))]
+                if not trivy:
+                    return {"trivy_available": False, "results": None,
+                            "skipped_reason": "trivy_unavailable",
+                            "scan_level": level, "scan_level_desc": level_desc}
 
-            if level == 5:
-                payload = {"trivy_available": True, "results": None,
-                           "skipped_reason": "no_dependency_info",
-                           "scan_level": 5, "scan_level_desc": level_desc}
-                return [types.TextContent(type="text", text=json.dumps(payload))]
+                if level == 5:
+                    return {"trivy_available": True, "results": None,
+                            "skipped_reason": "no_dependency_info",
+                            "scan_level": 5, "scan_level_desc": level_desc}
 
-            scan_path = path
-            if level == 3:
-                scan_path = os.path.join(path, "node_modules")
-                scanners = ["vuln"]
+                scan_path = path
+                scanners_local = list(scanners)
+                if level == 3:
+                    scan_path = os.path.join(path, "node_modules")
+                    scanners_local = ["vuln"]
 
-            proc = subprocess.run(
-                [trivy, "fs", scan_path,
-                 "--scanners", ",".join(scanners),
-                 "--format", "json", "--quiet"],
-                capture_output=True, text=True, timeout=120,
-            )
-            try:
-                results = json.loads(proc.stdout) if proc.stdout.strip() else {}
-            except json.JSONDecodeError:
-                results = {"raw": proc.stdout, "stderr": proc.stderr}
+                proc = subprocess.run(
+                    [trivy, "fs", scan_path,
+                     "--scanners", ",".join(scanners_local),
+                     "--format", "json", "--quiet"],
+                    capture_output=True, text=True, timeout=120,
+                )
+                try:
+                    results = json.loads(proc.stdout) if proc.stdout.strip() else {}
+                except json.JSONDecodeError:
+                    results = {"raw": proc.stdout, "stderr": proc.stderr}
 
-            payload = {"trivy_available": True, "results": results,
-                       "skipped_reason": None,
-                       "scan_level": level, "scan_level_desc": level_desc}
+                return {"trivy_available": True, "results": results,
+                        "skipped_reason": None,
+                        "scan_level": level, "scan_level_desc": level_desc}
+
+            payload = await asyncio.to_thread(_run_scan_directory)
             return [types.TextContent(type="text", text=json.dumps(payload))]
 
         if name == "check_osv":
-            result = query_osv(arguments["package"], arguments["ecosystem"])
+            # urllib HTTP call — offload to worker thread.
+            result = await asyncio.to_thread(
+                query_osv, arguments["package"], arguments["ecosystem"]
+            )
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "discover_targets":
-            result = discover_targets(
-                target=arguments.get("target"),
-                path=arguments.get("path"),
+            # Recursive filesystem walk across ~/.claude, ~/.gemini, ~/.codex —
+            # offload to worker thread.
+            result = await asyncio.to_thread(
+                discover_targets,
+                arguments.get("target"),
+                arguments.get("path"),
             )
             return [types.TextContent(type="text", text=json.dumps(result))]
 
@@ -1926,7 +1937,8 @@ if Server is not None:
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "clone_repo":
-            result = clone_repo(url=arguments["url"])
+            # git clone + network — offload to worker thread.
+            result = await asyncio.to_thread(clone_repo, arguments["url"])
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "cleanup_clone":
@@ -1934,15 +1946,21 @@ if Server is not None:
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "extract_zip":
-            result = extract_zip(source=arguments["source"])
+            # Zip extraction + optional network download — offload to worker
+            # thread; large zips can take many seconds of pure I/O.
+            result = await asyncio.to_thread(extract_zip, arguments["source"])
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "analyze_python":
-            path = arguments["path"]
-            if not _is_safe_root(path):
-                result = {"error": "path not permitted"}
-            else:
-                result = analyze_python(path=path)
+            # AST parsing + taint analysis is CPU-bound and walks directories
+            # recursively — offload to worker thread.
+            def _run_analyze_python():
+                path = arguments["path"]
+                if not _is_safe_root(path):
+                    return {"error": "path not permitted"}
+                return analyze_python(path=path)
+
+            result = await asyncio.to_thread(_run_analyze_python)
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "to_sarif":
@@ -2017,7 +2035,11 @@ if Server is not None:
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "generate_report":
-            result = generate_report(
+            # Writes up to 3 report files (md / json / sarif) and runs
+            # SARIF generation over the full findings set — offload to a
+            # worker thread so the MCP event loop stays responsive.
+            result = await asyncio.to_thread(
+                generate_report,
                 scan_id=arguments["scan_id"],
                 formats=arguments.get("formats"),
                 metadata=arguments.get("metadata"),
