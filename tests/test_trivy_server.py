@@ -1693,3 +1693,50 @@ def test_generate_report_no_skipped_section_when_empty():
         content = f.read()
     assert "Incomplete Scans" not in content
     assert "total_skipped" not in result
+
+
+# Every tool whose body does subprocess, network, recursive filesystem walk,
+# tarball extraction, or multi-file report writing MUST be dispatched via
+# asyncio.to_thread. Failing to offload one of these blocks the MCP event
+# loop for the full call duration, causing every other tool call on the
+# same server to time out — the exact 4-minute Claude Desktop hang the
+# user reported.
+#
+# Light-I/O tools (read_file, write_file, store_findings, cleanup_clone,
+# normalize_trivy, to_sarif, atr_status, catalogs_status, atr_update,
+# compute_risk_score) are NOT in this list because they finish in
+# milliseconds for realistic inputs and the overhead of a thread context
+# switch outweighs the benefit.
+_BLOCKING_DISPATCHES = [
+    ("scan_directory", 'if name == "check_osv":'),
+    ("check_osv", 'if name == "discover_targets":'),
+    ("discover_targets", 'if name == "read_file":'),
+    ("clone_repo", 'if name == "cleanup_clone":'),
+    ("extract_zip", 'if name == "analyze_python":'),
+    ("analyze_python", 'if name == "to_sarif":'),
+    ("atr_match", 'if name == "atr_status":'),
+    ("atr_scan_path", 'if name == "store_findings":'),
+    ("generate_report", 'if name == "scan_all":'),
+    ("scan_all", 'if name == "compute_risk_score":'),
+]
+
+
+@pytest.mark.parametrize("tool_name,next_branch_marker", _BLOCKING_DISPATCHES)
+def test_blocking_tool_dispatch_uses_to_thread(tool_name, next_branch_marker):
+    """Source-level regression: each blocking dispatch must include
+    `asyncio.to_thread`. If someone reverts one of these to a sync call,
+    the MCP event loop will freeze and Claude Desktop will time out at
+    4 minutes."""
+    import server.trivy_server as ts
+
+    with open(ts.__file__, "r") as f:
+        src = f.read()
+    parts = src.split(f'if name == "{tool_name}":', 1)
+    assert len(parts) == 2, f"{tool_name} dispatch branch not found"
+    branch = parts[1].split(next_branch_marker, 1)[0]
+    assert "asyncio.to_thread" in branch, (
+        f"{tool_name} must dispatch via asyncio.to_thread to keep the "
+        f"MCP event loop responsive (blocks subprocess / network / "
+        f"recursive walk / tarball extract / multi-file report write — "
+        f"would freeze concurrent calls)"
+    )
