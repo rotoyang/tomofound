@@ -10,3 +10,17 @@ __pycache__/
 
 # Design docs / plans (kept locally, not committed)
 docs/
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.secret
+credentials.json
+
+# SSH keys
+id_rsa
+id_ed25519
