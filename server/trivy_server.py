@@ -116,6 +116,37 @@ _STANDARD_ROOTS = {
     ],
 }
 
+_KNOWN_OFFICIAL_PUBLISHERS: dict[str, str] = {
+    "anthropic": "Anthropic",
+    "google": "Google",
+    "openai": "OpenAI",
+    "openai-bundled": "OpenAI",
+}
+
+_SCAN_DEPTH_BY_TIER: dict[str, dict] = {
+    "verified": {
+        "atr": True,
+        "trivy": False,
+        "llm_analysis": False,
+        "python_ast": False,
+        "description": "ATR regex scan only — official publisher, low risk",
+    },
+    "community": {
+        "atr": True,
+        "trivy": True,
+        "llm_analysis": False,
+        "python_ast": False,
+        "description": "ATR + Trivy CVE scan — known community publisher",
+    },
+    "unknown": {
+        "atr": True,
+        "trivy": True,
+        "llm_analysis": True,
+        "python_ast": True,
+        "description": "Full scan — unknown provenance",
+    },
+}
+
 _READ_ALLOWED_PREFIXES = [
     os.path.expanduser("~/.claude/"),
     os.path.expanduser("~/.gemini/"),
@@ -478,6 +509,34 @@ def discover_targets(target: str = None, path: str = None) -> dict:
                         })
 
     return {"items": items}
+
+
+def _extract_publisher(plugin: str | None) -> str | None:
+    if not plugin or "/" not in plugin:
+        return None
+    return plugin.split("/", 1)[0].lower()
+
+
+def classify_trust(targets: list) -> dict:
+    results = []
+    summary = {"verified": 0, "community": 0, "unknown": 0}
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        publisher = _extract_publisher(target.get("plugin"))
+        if publisher and publisher in _KNOWN_OFFICIAL_PUBLISHERS:
+            tier = "verified"
+        elif publisher:
+            tier = "community"
+        else:
+            tier = "unknown"
+        annotated = dict(target)
+        annotated["trust_tier"] = tier
+        annotated["publisher"] = publisher
+        annotated["scan_depth"] = dict(_SCAN_DEPTH_BY_TIER[tier])
+        results.append(annotated)
+        summary[tier] += 1
+    return {"targets": results, "summary": summary}
 
 
 def read_file(path: str, root: str = None) -> dict:
@@ -1942,6 +2001,21 @@ if Server is not None:
                     "required": ["findings"],
                 },
             ),
+            types.Tool(
+                name="classify_trust",
+                description="Classify discover_targets items into trust tiers (verified/community/unknown) based on publisher provenance and return recommended scan depth per target. Verified (official publishers like Anthropic/Google/OpenAI): ATR-only. Community (known publisher): ATR + Trivy. Unknown (local/unsigned): full scan (ATR + Trivy + LLM + Python AST). Returns {targets: [{...original, trust_tier, publisher, scan_depth}], summary}.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "targets": {
+                            "type": "array",
+                            "description": "List of target items from discover_targets output.",
+                            "items": {"type": "object"},
+                        },
+                    },
+                    "required": ["targets"],
+                },
+            ),
         ]
 
     @_server.call_tool()
@@ -2162,6 +2236,10 @@ if Server is not None:
 
         if name == "compute_risk_score":
             result = compute_risk_score(findings=arguments.get("findings") or [])
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "classify_trust":
+            result = classify_trust(targets=arguments.get("targets") or [])
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")
