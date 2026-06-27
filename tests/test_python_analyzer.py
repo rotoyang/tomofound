@@ -347,3 +347,185 @@ def test_taint_still_catches_real_envvar_to_eval(tmp_path):
             eval(x)
     """)
     assert any("eval" in f["description"] for f in findings)
+
+
+# --- SSRF detection ---
+
+def test_taint_ssrf_requests_get(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        import requests
+        def f():
+            url = input('URL: ')
+            requests.get(url)
+    """)
+    assert any("SSRF" in f["description"] and "requests.get" in f["description"]
+               for f in findings)
+
+
+def test_taint_ssrf_requests_post(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        import requests
+        def f():
+            url = input('URL: ')
+            requests.post(url, data='x')
+    """)
+    assert any("SSRF" in f["description"] and "requests.post" in f["description"]
+               for f in findings)
+
+
+def test_taint_ssrf_urlopen(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        from urllib import request
+        def f():
+            url = input('URL: ')
+            request.urlopen(url)
+    """)
+    assert any("SSRF" in f["description"] and "urlopen" in f["description"]
+               for f in findings)
+
+
+def test_taint_ssrf_envvar_to_requests(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        import os, requests
+        def f():
+            url = os.environ['TARGET']
+            requests.get(url)
+    """)
+    assert any("SSRF" in f["description"] for f in findings)
+
+
+def test_ssrf_safe_hardcoded_url_not_flagged(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        import requests
+        def f():
+            requests.get('https://example.com/api')
+    """)
+    assert not any("SSRF" in f["description"] for f in findings)
+
+
+def test_ssrf_safe_url_after_reassignment(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        import requests
+        def f():
+            url = input('URL: ')
+            url = 'https://safe.example.com'
+            requests.get(url)
+    """)
+    assert not any("SSRF" in f["description"] for f in findings)
+
+
+# --- SQL injection detection ---
+
+def test_taint_sql_fstring(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        import sqlite3
+        def f():
+            name = input('name: ')
+            conn = sqlite3.connect(':memory:')
+            conn.execute(f"SELECT * FROM users WHERE name = '{name}'")
+    """)
+    assert any("SQL injection" in f["description"] for f in findings)
+
+
+def test_taint_sql_format_method(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(cursor):
+            name = input('name: ')
+            query = "SELECT * FROM users WHERE name = '{}'".format(name)
+            cursor.execute(query)
+    """)
+    assert any("SQL injection" in f["description"] for f in findings)
+
+
+def test_taint_sql_percent_format(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(cursor):
+            name = input('name: ')
+            query = "SELECT * FROM users WHERE name = '%s'" % name
+            cursor.execute(query)
+    """)
+    assert any("SQL injection" in f["description"] for f in findings)
+
+
+def test_taint_sql_concat(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(cursor):
+            name = input('name: ')
+            query = "SELECT * FROM users WHERE name = '" + name + "'"
+            cursor.execute(query)
+    """)
+    assert any("SQL injection" in f["description"] for f in findings)
+
+
+def test_sql_parameterized_query_not_flagged(tmp_path):
+    """Parameterized queries are safe — should NOT be flagged."""
+    findings = _taint_findings(tmp_path, """
+        def f(cursor):
+            name = input('name: ')
+            cursor.execute("SELECT * FROM users WHERE name = ?", (name,))
+    """)
+    assert not any("SQL injection" in f["description"] for f in findings)
+
+
+def test_sql_hardcoded_query_not_flagged(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(cursor):
+            cursor.execute("SELECT * FROM users")
+    """)
+    assert not any("SQL injection" in f["description"] for f in findings)
+
+
+def test_sql_executemany_fstring(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(cursor):
+            table = input('table: ')
+            cursor.executemany(f"INSERT INTO {table} VALUES (?)", rows)
+    """)
+    assert any("SQL injection" in f["description"] for f in findings)
+
+
+# --- LDAP injection detection ---
+
+def test_taint_ldap_search_s(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(ldap):
+            uid = input('uid: ')
+            filt = f"(uid={uid})"
+            ldap.search_s("dc=example,dc=com", 2, filt)
+    """)
+    assert any("LDAP injection" in f["description"] for f in findings)
+
+
+def test_taint_ldap_search(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(ldap):
+            uid = input('uid: ')
+            ldap.search("dc=example,dc=com", 2, f"(uid={uid})")
+    """)
+    assert any("LDAP injection" in f["description"] for f in findings)
+
+
+def test_taint_ldap_search_keyword_filterstr(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(ldap):
+            uid = input('uid: ')
+            ldap.search_s("dc=example,dc=com", 2, filterstr=f"(uid={uid})")
+    """)
+    assert any("LDAP injection" in f["description"] for f in findings)
+
+
+def test_ldap_safe_hardcoded_filter_not_flagged(tmp_path):
+    findings = _taint_findings(tmp_path, """
+        def f(ldap):
+            ldap.search_s("dc=example,dc=com", 2, "(uid=admin)")
+    """)
+    assert not any("LDAP injection" in f["description"] for f in findings)
+
+
+def test_ldap_safe_no_filter_arg_not_flagged(tmp_path):
+    """search_s with only base and scope (no filter) — no crash, no finding."""
+    findings = _taint_findings(tmp_path, """
+        def f(ldap):
+            ldap.search_s("dc=example,dc=com", 2)
+    """)
+    assert not any("LDAP injection" in f["description"] for f in findings)

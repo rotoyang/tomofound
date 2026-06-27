@@ -17,18 +17,22 @@ REPORTS_DIR="$DATA_ROOT/reports"
 CLAUDE_CONFIG_PATH="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 CODEX_CONFIG_PATH="$HOME/.codex/config.toml"
 CODEX_SKILL_DIR="$HOME/.codex/skills/security-scan"
+GEMINI_SKILL_DIR="$HOME/.gemini/skills/security-scan"
 
 INSTALL_CLAUDE=1
 INSTALL_CODEX=1
+INSTALL_GEMINI=1
 CLEAN_INSTALL=0
 
 usage() {
   cat <<'EOF'
-Usage: ./setup.sh [--all|--claude|--codex] [--clean]
+Usage: ./setup.sh [--all|--claude|--codex|--gemini] [--clean]
 
-  --all      Install shared tomofound assets and configure both Claude and Codex (default)
+  --all      Install shared tomofound assets and configure Claude, Codex,
+             and Gemini (default)
   --claude   Configure Claude only
   --codex    Configure Codex only
+  --gemini   Configure Gemini CLI only
   --clean    Remove all of ~/.tomofound/ (including reports, catalogs, Trivy
              binary) before installing. Confirms with a 5-second abort window.
              Default behaviour preserves these, so --clean is only needed when
@@ -41,14 +45,22 @@ while [[ $# -gt 0 ]]; do
     --all)
       INSTALL_CLAUDE=1
       INSTALL_CODEX=1
+      INSTALL_GEMINI=1
       ;;
     --claude)
       INSTALL_CLAUDE=1
       INSTALL_CODEX=0
+      INSTALL_GEMINI=0
       ;;
     --codex)
       INSTALL_CLAUDE=0
       INSTALL_CODEX=1
+      INSTALL_GEMINI=0
+      ;;
+    --gemini)
+      INSTALL_CLAUDE=0
+      INSTALL_CODEX=0
+      INSTALL_GEMINI=1
       ;;
     --clean)
       CLEAN_INSTALL=1
@@ -236,6 +248,12 @@ else:
 PYEOF
 fi
 
+if [[ "$INSTALL_GEMINI" -eq 1 ]]; then
+mkdir -p "$GEMINI_SKILL_DIR"
+curl -fsSL "$BASE_URL/integrations/gemini/skills/security-scan/SKILL.md" -o "$GEMINI_SKILL_DIR/SKILL.md"
+echo "✅ Gemini skill installed to $GEMINI_SKILL_DIR"
+fi
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "Installation complete. Next steps:"
@@ -246,6 +264,10 @@ echo "    Type \"/\" in any chat — you should see /security_scan."
 fi
 if [[ "$INSTALL_CODEX" -eq 1 ]]; then
 echo "  • Restart Codex or open a new Codex thread."
+echo "    Invoke the security-scan skill when auditing extensions."
+fi
+if [[ "$INSTALL_GEMINI" -eq 1 ]]; then
+echo "  • Restart Gemini CLI or open a new session."
 echo "    Invoke the security-scan skill when auditing extensions."
 fi
 echo "─────────────────────────────────────────────"

@@ -6,7 +6,7 @@ Scans extensions installed for Claude Code, Gemini CLI, and Codex CLI for secret
 
 ## How it works
 
-tomofound is **install once, then use it from Claude or Codex**:
+tomofound is **install once, then use it from Claude, Codex, or Gemini CLI**:
 
 1. Run `setup.sh` one time to install the MCP server and scan-rule prompt.
 2. Add the scan-rule prompt as a **Skill** in Claude Desktop App (one-time drag-and-drop).
@@ -17,6 +17,7 @@ tomofound is **install once, then use it from Claude or Codex**:
 - macOS
 - [Claude desktop app](https://claude.ai/download) (for Claude usage)
 - Codex (for Codex usage)
+- [Gemini CLI](https://github.com/google-gemini/gemini-cli) (for Gemini CLI usage)
 - Python 3 (preinstalled on macOS)
 - `git` on PATH (only needed when you pass a `https://github.com/...` URL)
 
@@ -28,7 +29,7 @@ tomofound is **install once, then use it from Claude or Codex**:
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash
 ```
 
-By default this configures both Claude and Codex.
+By default this configures Claude, Codex, and Gemini CLI.
 
 ```bash
 # Claude only
@@ -36,6 +37,9 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 
 # Codex only
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash -s -- --codex
+
+# Gemini CLI only
+curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash -s -- --gemini
 ```
 
 ### Step 2 — Register the skill in Claude Desktop App
@@ -50,14 +54,19 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 
 Restart Codex or open a new thread. The `security-scan` skill should be available and the `tomofound` MCP tools should load.
 
+### Step 2 (Gemini CLI) — Restart Gemini CLI
+
+Restart Gemini CLI or open a new session. The `security-scan` skill is installed to `~/.gemini/skills/security-scan/SKILL.md` and should be available for invocation.
+
 ### What the installer does
 
 1. Copies the MCP server (`trivy_server.py`) and the scan-rule prompt (`security-scan.md`) into `~/.tomofound/`
 2. Registers the `tomofound` MCP server in `~/Library/Application Support/Claude/claude_desktop_config.json`
 3. Installs the Codex skill wrapper into `~/.codex/skills/security-scan/SKILL.md`
 4. Registers the `tomofound` MCP server in `~/.codex/config.toml`
+5. Installs the Gemini CLI skill wrapper into `~/.gemini/skills/security-scan/SKILL.md`
 
-After this, you can forget about installation — just use `/security-scan` in Claude chat or the `security-scan` skill in Codex.
+After this, you can forget about installation — just use `/security-scan` in Claude chat, the `security-scan` skill in Codex, or the `security-scan` skill in Gemini CLI.
 
 ### Updating
 
@@ -74,6 +83,44 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 ```
 
 `--clean` wipes the entire `~/.tomofound/` directory after a 5-second confirm window. The MCP server registration in `claude_desktop_config.json` / `~/.codex/config.toml` is re-written either way.
+
+## Troubleshooting
+
+### MCP server won't start / dies immediately
+
+- Verify Python 3.10+: `~/.tomofound/venv/bin/python --version`
+- Check the MCP SDK is installed: `~/.tomofound/venv/bin/pip list | grep -i mcp`
+- Re-run `setup.sh` to refresh server files and let the bootstrap reinstall dependencies on next start.
+
+### Trivy download fails / times out
+
+- Check network connectivity and proxy settings — the installer fetches Trivy from `github.com`.
+- Install Trivy manually (`brew install trivy` or download from [GitHub releases](https://github.com/aquasecurity/trivy/releases)) and ensure it is on `PATH`.
+- If the SHA-256 verification fails, retry the download; persistent failures suggest a network integrity issue (transparent proxy, captive portal).
+
+### ATR catalog not downloading
+
+- Confirm you can reach `github.com` (the catalog is fetched from the Agent-Threat-Rule repo).
+- Manually trigger a refresh by invoking the `atr_update` MCP tool.
+- Check available disk space in `~/.tomofound/` — the catalog needs a few MB.
+
+### Scan hangs or takes too long
+
+- Pass `time_budget_seconds` to `atr_scan_path` to cap scan time (e.g. 60 seconds).
+- Scan individual plugin directories rather than an entire `~/.claude/` tree at once.
+- If a scan returns `budget_exceeded`, re-invoke on a narrower path.
+
+### "No findings" but expected results
+
+- Check the ATR catalog is installed by invoking the `atr_status` tool — if the catalog is missing, run `atr_update` first.
+- Verify the target path exists and contains scannable files by running the `discover_targets` tool.
+- Ensure extensions are installed in their standard locations (`~/.claude/`, `~/.codex/`, `~/.gemini/`).
+
+### setup.sh errors
+
+- **"Not macOS"**: tomofound currently supports macOS only; Linux support is planned.
+- **Permission denied**: check ownership of `~/.tomofound/` (`ls -la ~/.tomofound`).
+- For a clean slate, re-run setup.sh with `--clean` to wipe and recreate the installation directory.
 
 ### Uninstall
 
@@ -123,6 +170,10 @@ Type `/security-scan` in any Claude chat window, then follow it with a target:
 
 Invoke the `security-scan` skill when asking Codex to audit installed extensions, a local path, a `.zip` archive, or a public GitHub repository. Codex uses the same Tomofound MCP server and writes reports to the same `~/.tomofound/reports/` directory.
 
+### Gemini CLI
+
+Invoke the `security-scan` skill when asking Gemini CLI to audit installed extensions, a local path, a `.zip` archive, or a public GitHub repository. Gemini CLI uses the same Tomofound MCP server and writes reports to the same `~/.tomofound/reports/` directory.
+
 ## What it scans
 
 | Item | Method | Detects |
@@ -149,7 +200,7 @@ Each scan produces a 0–100 risk score (severity-weighted across all findings) 
 
 ## How rules work
 
-Detection rules live in `skills/security-scan/security-scan.md` (installed locally to `~/.tomofound/skills/security-scan/security-scan.md`). The MCP server loads this file at startup and serves it as the Claude `/security-scan` prompt. Codex uses `integrations/codex/skills/security-scan/SKILL.md` as a lightweight skill wrapper around the same MCP tools. To add a shared scan rule, edit the Claude prompt and Codex wrapper as needed, then re-run the installer.
+Detection rules live in `skills/security-scan/security-scan.md` (installed locally to `~/.tomofound/skills/security-scan/security-scan.md`). The MCP server loads this file at startup and serves it as the Claude `/security-scan` prompt. Codex uses `integrations/codex/skills/security-scan/SKILL.md` and Gemini CLI uses `integrations/gemini/skills/security-scan/SKILL.md` as lightweight skill wrappers around the same MCP tools. To add a shared scan rule, edit the Claude prompt and the Codex/Gemini wrappers as needed, then re-run the installer.
 
 ## Reports
 
@@ -199,9 +250,10 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `server/python_analyzer.py` | This repo | AST + taint static analysis |
 | `skills/security-scan/security-scan.md` | This repo | Detection rules loaded as an MCP prompt |
 | `integrations/codex/skills/security-scan/SKILL.md` | This repo | Codex-side wrapper around the same MCP tools |
+| `integrations/gemini/skills/security-scan/SKILL.md` | This repo | Gemini CLI-side wrapper around the same MCP tools |
 | `setup.sh` | This repo | One-shot installer |
 
-No third-party Python wheels are vendored, no binary blobs ship in the repo, and the installer touches only `~/.tomofound/`, `~/Library/Application Support/Claude/claude_desktop_config.json`, and (if Codex is selected) `~/.codex/config.toml` + `~/.codex/skills/security-scan/`.
+No third-party Python wheels are vendored, no binary blobs ship in the repo, and the installer touches only `~/.tomofound/`, `~/Library/Application Support/Claude/claude_desktop_config.json`, (if Codex is selected) `~/.codex/config.toml` + `~/.codex/skills/security-scan/`, and (if Gemini is selected) `~/.gemini/skills/security-scan/`.
 
 ### Attribution
 
