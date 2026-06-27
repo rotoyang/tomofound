@@ -1575,14 +1575,16 @@ def test_scan_all_skips_nonexistent_path():
 
 
 def test_scan_all_handles_empty_dir(tmp_path):
-    result = scan_all(paths=[str(tmp_path)])
+    with patch("server.trivy_server.find_or_install_trivy", return_value="/usr/local/bin/trivy"):
+        result = scan_all(paths=[str(tmp_path)])
     assert result["directories_skipped"] == 1
     per = result["per_directory"][0]
     assert per["skipped_reason"] == "no_dependency_info"
 
 
 def test_scan_all_with_label(tmp_path):
-    result = scan_all(paths=[{"path": str(tmp_path), "label": "test-plugin"}])
+    with patch("server.trivy_server.find_or_install_trivy", return_value="/usr/local/bin/trivy"):
+        result = scan_all(paths=[{"path": str(tmp_path), "label": "test-plugin"}])
     per = result["per_directory"][0]
     assert per["label"] == "test-plugin"
 
