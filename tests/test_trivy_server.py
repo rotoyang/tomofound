@@ -1742,3 +1742,149 @@ def test_blocking_tool_dispatch_uses_to_thread(tool_name, next_branch_marker):
         f"recursive walk / tarball extract / multi-file report write — "
         f"would freeze concurrent calls)"
     )
+
+
+# ── incremental scan state ───────────────────────────────────────────────
+
+
+def _fake_home_with_scan_state(monkeypatch, tmp_path):
+    home = _fake_home(monkeypatch, tmp_path)
+    scan_state_path = os.path.join(home, ".tomofound", "scan_state.json")
+    monkeypatch.setattr("server.trivy_server.SCAN_STATE_PATH", scan_state_path)
+    return home, scan_state_path
+
+
+def test_scan_state_returns_empty_on_first_run(tmp_path, monkeypatch):
+    home, scan_state_path = _fake_home_with_scan_state(monkeypatch, tmp_path)
+    from server.trivy_server import get_scan_state
+    result = get_scan_state()
+    assert result == {"entries": 0, "state": {}}
+
+
+def test_clear_scan_state_removes_file(tmp_path, monkeypatch):
+    home, scan_state_path = _fake_home_with_scan_state(monkeypatch, tmp_path)
+    os.makedirs(os.path.dirname(scan_state_path), exist_ok=True)
+    with open(scan_state_path, "w") as f:
+        json.dump({"dummy": {}}, f)
+    from server.trivy_server import clear_scan_state
+    result = clear_scan_state()
+    assert result["ok"] is True
+    assert not os.path.exists(scan_state_path)
+
+
+def test_atr_scan_path_incremental_skips_unchanged_file(tmp_path, monkeypatch):
+    home, scan_state_path = _fake_home_with_scan_state(monkeypatch, tmp_path)
+    _seed_atr_catalog_under_home(home)
+    skill_dir = os.path.join(home, ".claude", "skills", "test")
+    os.makedirs(skill_dir, exist_ok=True)
+    skill_file = os.path.join(skill_dir, "SKILL.md")
+    with open(skill_file, "w") as f:
+        f.write("safe content here")
+
+    r1 = atr_scan_path(skill_dir)
+    assert r1.get("files_scanned", 0) >= 1
+    assert r1.get("files_skipped_unchanged") is None
+
+    r2 = atr_scan_path(skill_dir)
+    assert r2.get("files_skipped_unchanged") == 1
+    assert r2.get("files_scanned", 0) == 0
+
+
+def test_atr_scan_path_incremental_rescans_changed_file(tmp_path, monkeypatch):
+    home, scan_state_path = _fake_home_with_scan_state(monkeypatch, tmp_path)
+    _seed_atr_catalog_under_home(home)
+    skill_dir = os.path.join(home, ".claude", "skills", "test")
+    os.makedirs(skill_dir, exist_ok=True)
+    skill_file = os.path.join(skill_dir, "SKILL.md")
+    with open(skill_file, "w") as f:
+        f.write("original content")
+
+    atr_scan_path(skill_dir)
+
+    with open(skill_file, "w") as f:
+        f.write("modified content")
+
+    r2 = atr_scan_path(skill_dir)
+    assert r2.get("files_skipped_unchanged") is None
+    assert r2.get("files_scanned", 0) == 1
+
+
+def test_atr_scan_path_incremental_false_forces_full_scan(tmp_path, monkeypatch):
+    home, scan_state_path = _fake_home_with_scan_state(monkeypatch, tmp_path)
+    _seed_atr_catalog_under_home(home)
+    skill_dir = os.path.join(home, ".claude", "skills", "test")
+    os.makedirs(skill_dir, exist_ok=True)
+    with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
+        f.write("safe content")
+
+    atr_scan_path(skill_dir)
+    r2 = atr_scan_path(skill_dir, incremental=False)
+    assert r2.get("files_skipped_unchanged") is None
+    assert r2.get("files_scanned", 0) == 1
+
+
+def test_atr_scan_path_incremental_invalidates_on_catalog_change(tmp_path, monkeypatch):
+    home, scan_state_path = _fake_home_with_scan_state(monkeypatch, tmp_path)
+    _seed_atr_catalog_under_home(home)
+    skill_dir = os.path.join(home, ".claude", "skills", "test")
+    os.makedirs(skill_dir, exist_ok=True)
+    with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
+        f.write("safe content")
+
+    atr_scan_path(skill_dir)
+
+    monkeypatch.setattr(
+        _atr_catalog, "catalog_status",
+        lambda: {"available": True, "version": "99.0.0"},
+    )
+
+    r2 = atr_scan_path(skill_dir)
+    assert r2.get("files_skipped_unchanged") is None
+    assert r2.get("files_scanned", 0) == 1
+
+
+def test_atr_scan_path_skipped_files_count_toward_budget(tmp_path, monkeypatch):
+    home, scan_state_path = _fake_home_with_scan_state(monkeypatch, tmp_path)
+    _seed_atr_catalog_under_home(home)
+    skill_dir = os.path.join(home, ".claude", "skills", "test")
+    os.makedirs(skill_dir, exist_ok=True)
+    for i in range(5):
+        with open(os.path.join(skill_dir, f"file{i}.md"), "w") as f:
+            f.write(f"content {i}")
+
+    atr_scan_path(skill_dir)
+
+    r2 = atr_scan_path(skill_dir, max_files=3)
+    assert r2.get("files_skipped_unchanged", 0) == 3
+    assert r2.get("budget_exceeded") is True
+
+
+def test_scan_state_persists_across_calls(tmp_path, monkeypatch):
+    home, scan_state_path = _fake_home_with_scan_state(monkeypatch, tmp_path)
+    _seed_atr_catalog_under_home(home)
+    skill_dir = os.path.join(home, ".claude", "skills", "test")
+    os.makedirs(skill_dir, exist_ok=True)
+    with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
+        f.write("safe content")
+
+    atr_scan_path(skill_dir)
+
+    from server.trivy_server import get_scan_state
+    state = get_scan_state()
+    assert state["entries"] == 1
+    entry = list(state["state"].values())[0]
+    assert "sha256" in entry
+    assert "catalog_version" in entry
+    assert entry["findings_count"] == 0
+
+
+def test_atr_update_invalidates_scan_state(tmp_path, monkeypatch):
+    """Verify via source that atr_update dispatch clears SCAN_STATE_PATH."""
+    import server.trivy_server as ts
+    with open(ts.__file__, "r") as f:
+        src = f.read()
+    parts = src.split('if name == "atr_update":', 1)
+    assert len(parts) == 2
+    branch = parts[1].split('if name ==', 1)[0]
+    assert "SCAN_STATE_PATH" in branch
+    assert "os.unlink" in branch

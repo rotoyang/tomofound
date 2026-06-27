@@ -200,6 +200,14 @@ findings are listed; clean files are counted but not enumerated. This is the
 cheapest way to get ATR coverage on the ~1000s of vendor docs bundled inside
 official plugins.
 
+**Incremental scanning** is enabled by default. Files whose sha256 hash and ATR
+catalog version match the cached state are skipped automatically — reported as
+`files_skipped_unchanged` in the response. On a second scan of the same tree,
+only new or modified files are processed. Pass `incremental: false` to force a
+full rescan. Use `clear_scan_state` to reset the cache, or `scan_state` to
+inspect it. The cache is automatically invalidated when `atr_update` downloads
+a new catalog version.
+
 If `budget_exceeded: true` comes back, the response carries only the partial
 findings collected before the budget tripped — `files_scanned` will be less
 than the actual number of files under that path, and the remaining files were
