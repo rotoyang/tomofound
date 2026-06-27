@@ -69,13 +69,30 @@ The tool returns `{ "items": [ { "path", "tag", "source_type", "plugin" } ] }`.
 - `plugin`: `publisher/plugin-name` for plugins, skill name for skills, `null` for mcp/config files.
 - `path`: absolute host filesystem path — use as-is when calling `read_file` or `scan_directory`.
 
-Use this items list as the scan target list for all subsequent steps.
+After receiving `discover_targets` output, classify each target's trust level:
+
+```
+Call MCP tool: classify_trust
+  targets: <the `items` array from discover_targets>
+```
+
+The tool returns `{ "targets": [...], "summary": { "verified": N, "community": N, "unknown": N } }`.
+Each target now carries `trust_tier` ("verified", "community", "unknown") and `scan_depth`
+(which scan phases to run). Use this annotated list as the scan target list for all subsequent steps.
+
+**Scan depth by trust tier:**
+- `verified` (official publishers: Anthropic, Google, OpenAI): ATR regex scan only. Skip Trivy and LLM analysis.
+- `community` (published community extensions with known publisher): ATR + Trivy CVE scan. Skip LLM analysis.
+- `unknown` (local/unsigned/no publisher): Full scan — ATR + Trivy + LLM + Python AST.
 
 ---
 
 ### Step 2 — CVE and secret scanning via MCP
 
-For each plugin directory tagged `CODE`, call the MCP tool instead of running Bash directly:
+**Before scanning each target**, check its `scan_depth.trivy` field. If `false`, skip
+Trivy/CVE scanning for that target entirely.
+
+For each plugin directory tagged `CODE` where `scan_depth.trivy` is `true`, call the MCP tool:
 
 **Scan a directory:**
 ```
@@ -200,6 +217,14 @@ findings are listed; clean files are counted but not enumerated. This is the
 cheapest way to get ATR coverage on the ~1000s of vendor docs bundled inside
 official plugins.
 
+**Incremental scanning** is enabled by default. Files whose sha256 hash and ATR
+catalog version match the cached state are skipped automatically — reported as
+`files_skipped_unchanged` in the response. On a second scan of the same tree,
+only new or modified files are processed. Pass `incremental: false` to force a
+full rescan. Use `clear_scan_state` to reset the cache, or `scan_state` to
+inspect it. The cache is automatically invalidated when `atr_update` downloads
+a new catalog version.
+
 If `budget_exceeded: true` comes back, the response carries only the partial
 findings collected before the budget tripped — `files_scanned` will be less
 than the actual number of files under that path, and the remaining files were
@@ -249,7 +274,11 @@ skipped — run atr_update to enable` in the report header.
 
 ### Step 3 — LLM analysis
 
-For each item, read the file content by calling the MCP tool:
+**Before analyzing each target**, check its `scan_depth.llm_analysis` field. If `false`,
+skip LLM semantic analysis for that target. This saves tokens for verified and community
+extensions where deterministic scanners provide sufficient coverage.
+
+For each item where `scan_depth.llm_analysis` is `true`, read the file content by calling the MCP tool:
 
 ```
 Call MCP tool: read_file

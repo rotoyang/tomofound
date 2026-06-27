@@ -66,6 +66,7 @@ TOOLS_DIR = os.path.join(DATA_ROOT, "tools")
 TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy")
 CLONE_PREFIX = "tomofound-scan-"
 REPORTS_DIR = os.path.join(DATA_ROOT, "reports")
+SCAN_STATE_PATH = os.path.join(DATA_ROOT, "scan_state.json")
 
 _PROMPT_NAME = "security_scan"
 _PROMPT_SOURCE_CANDIDATES = [
@@ -113,6 +114,37 @@ _STANDARD_ROOTS = {
         os.path.expanduser("~/.codex/plugins/cache"),
         os.path.expanduser("~/.codex/prompts"),
     ],
+}
+
+_KNOWN_OFFICIAL_PUBLISHERS: dict[str, str] = {
+    "anthropic": "Anthropic",
+    "google": "Google",
+    "openai": "OpenAI",
+    "openai-bundled": "OpenAI",
+}
+
+_SCAN_DEPTH_BY_TIER: dict[str, dict] = {
+    "verified": {
+        "atr": True,
+        "trivy": False,
+        "llm_analysis": False,
+        "python_ast": False,
+        "description": "ATR regex scan only — official publisher, low risk",
+    },
+    "community": {
+        "atr": True,
+        "trivy": True,
+        "llm_analysis": False,
+        "python_ast": False,
+        "description": "ATR + Trivy CVE scan — known community publisher",
+    },
+    "unknown": {
+        "atr": True,
+        "trivy": True,
+        "llm_analysis": True,
+        "python_ast": True,
+        "description": "Full scan — unknown provenance",
+    },
 }
 
 _READ_ALLOWED_PREFIXES = [
@@ -243,6 +275,41 @@ def _hash_file_sha256(path: str) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _load_scan_state() -> dict:
+    if not os.path.isfile(SCAN_STATE_PATH):
+        return {}
+    try:
+        with open(SCAN_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_scan_state(state: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(SCAN_STATE_PATH), exist_ok=True)
+        tmp = SCAN_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, SCAN_STATE_PATH)
+    except OSError:
+        pass
+
+
+def get_scan_state() -> dict:
+    state = _load_scan_state()
+    return {"entries": len(state), "state": state}
+
+
+def clear_scan_state() -> dict:
+    try:
+        if os.path.isfile(SCAN_STATE_PATH):
+            os.unlink(SCAN_STATE_PATH)
+        return {"ok": True, "message": "scan state cleared"}
+    except OSError as e:
+        return {"error": str(e)}
 
 
 def _fetch_trivy_checksums(version: str) -> dict[str, str]:
@@ -442,6 +509,34 @@ def discover_targets(target: str = None, path: str = None) -> dict:
                         })
 
     return {"items": items}
+
+
+def _extract_publisher(plugin: str | None) -> str | None:
+    if not plugin or "/" not in plugin:
+        return None
+    return plugin.split("/", 1)[0].lower()
+
+
+def classify_trust(targets: list) -> dict:
+    results = []
+    summary = {"verified": 0, "community": 0, "unknown": 0}
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        publisher = _extract_publisher(target.get("plugin"))
+        if publisher and publisher in _KNOWN_OFFICIAL_PUBLISHERS:
+            tier = "verified"
+        elif publisher:
+            tier = "community"
+        else:
+            tier = "unknown"
+        annotated = dict(target)
+        annotated["trust_tier"] = tier
+        annotated["publisher"] = publisher
+        annotated["scan_depth"] = dict(_SCAN_DEPTH_BY_TIER[tier])
+        results.append(annotated)
+        summary[tier] += 1
+    return {"targets": results, "summary": summary}
 
 
 def read_file(path: str, root: str = None) -> dict:
@@ -1349,6 +1444,7 @@ def atr_scan_path(
     extensions: list | None = None,
     time_budget_seconds: float | None = None,
     max_files: int | None = None,
+    incremental: bool = True,
 ) -> dict:
     """Server-side batch ATR scan: walk `path`, read each file, match against
     the cached ATR catalog — all inside the server, never sending file content
@@ -1399,14 +1495,20 @@ def atr_scan_path(
 
     files_skipped_too_large = 0
     files_skipped_unreadable = 0
+    files_skipped_unchanged = 0
     files_yielded = 0
     file_budget_exceeded = False
 
     deadline = time.monotonic() + time_budget
 
+    scan_state = _load_scan_state() if incremental else {}
+    catalog_meta = atr_catalog.catalog_status()
+    current_catalog_version = catalog_meta.get("version", "")
+    scanned_file_hashes: dict[str, str] = {}
+
     def _iter_items():
         nonlocal files_skipped_too_large, files_skipped_unreadable
-        nonlocal files_yielded, file_budget_exceeded
+        nonlocal files_skipped_unchanged, files_yielded, file_budget_exceeded
         for fp in _atr_scan_iter_files(abs_path, recursive, ext_tuple):
             if files_yielded >= file_budget:
                 file_budget_exceeded = True
@@ -1419,12 +1521,29 @@ def atr_scan_path(
             if size > FILE_READ_LIMIT:
                 files_skipped_too_large += 1
                 continue
+            if incremental and fp in scan_state:
+                cached = scan_state[fp]
+                if cached.get("catalog_version") == current_catalog_version:
+                    try:
+                        file_hash = _hash_file_sha256(fp)
+                    except OSError:
+                        files_skipped_unreadable += 1
+                        continue
+                    if file_hash == cached.get("sha256"):
+                        files_skipped_unchanged += 1
+                        files_yielded += 1
+                        continue
             try:
                 with open(fp, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
             except OSError:
                 files_skipped_unreadable += 1
                 continue
+            if incremental:
+                try:
+                    scanned_file_hashes[fp] = _hash_file_sha256(fp)
+                except OSError:
+                    pass
             files_yielded += 1
             yield (fp, content)
 
@@ -1433,12 +1552,28 @@ def atr_scan_path(
         deadline=deadline,
         time_budget_seconds=time_budget,
     )
+
+    if incremental and scanned_file_hashes:
+        finding_counts: dict[str, int] = {}
+        for f in result.get("findings", []):
+            fpath = f.get("file", "")
+            finding_counts[fpath] = finding_counts.get(fpath, 0) + 1
+        now = datetime.datetime.now().isoformat()
+        for fp, sha in scanned_file_hashes.items():
+            scan_state[fp] = {
+                "sha256": sha,
+                "last_scan_ts": now,
+                "findings_count": finding_counts.get(fp, 0),
+                "catalog_version": current_catalog_version,
+            }
+        _save_scan_state(scan_state)
+
     if files_skipped_too_large:
         result["files_skipped_too_large"] = files_skipped_too_large
     if files_skipped_unreadable:
         result["files_skipped_unreadable"] = files_skipped_unreadable
-    # The file-count budget is owned here; the time budget is owned by
-    # scan_contents (it sets budget_exceeded itself when the deadline trips).
+    if files_skipped_unchanged:
+        result["files_skipped_unchanged"] = files_skipped_unchanged
     if file_budget_exceeded and not result.get("budget_exceeded"):
         result["budget_exceeded"] = True
         result["budget_reason"] = (
@@ -1734,7 +1869,7 @@ if Server is not None:
             ),
             types.Tool(
                 name="atr_scan_path",
-                description="Server-side batch ATR scan: walks `path`, reads each file, runs the cached ATR regex catalog against it — all inside the server, never streaming file content back through the LLM. Returns ONLY files that produced findings; clean files are counted but not enumerated. Default extensions: .md/.json/.toml/.yaml/.yml. Path safety: same as read_file — must be under ~/.claude, ~/.gemini, or ~/.codex. Stops early after time_budget_seconds (default 30) OR max_files (default 5000) — returns partial findings + `budget_exceeded: true` so the caller can re-invoke on a narrower path (e.g. one plugin at a time) rather than the whole home tree. Returns {files_scanned, files_with_findings, findings, rules_evaluated} on success, {error} on path-not-permitted, or {catalog_missing: true, ...} if atr_update hasn't been run.",
+                description="Server-side batch ATR scan: walks `path`, reads each file, runs the cached ATR regex catalog against it — all inside the server, never streaming file content back through the LLM. Returns ONLY files that produced findings; clean files are counted but not enumerated. Default extensions: .md/.json/.toml/.yaml/.yml. Path safety: same as read_file — must be under ~/.claude, ~/.gemini, or ~/.codex. Supports incremental mode (default): files whose sha256 and ATR catalog version match the cached state are skipped automatically; reported as `files_skipped_unchanged` in the response. Pass `incremental: false` to force a full rescan. Stops early after time_budget_seconds (default 30) OR max_files (default 5000) — returns partial findings + `budget_exceeded: true` so the caller can re-invoke on a narrower path. Returns {files_scanned, files_with_findings, findings, rules_evaluated} on success, {error} on path-not-permitted, or {catalog_missing: true, ...} if atr_update hasn't been run.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1759,9 +1894,23 @@ if Server is not None:
                             "type": "integer",
                             "description": "Maximum number of files to actually scan (excludes skipped). Default 5000. Stops once exceeded and returns partial results with `budget_exceeded: true`.",
                         },
+                        "incremental": {
+                            "type": "boolean",
+                            "description": "Enable hash-based incremental scanning. Files unchanged since the last scan (matching sha256 + catalog version) are skipped. Default true. Pass false to force a full rescan.",
+                        },
                     },
                     "required": ["path"],
                 },
+            ),
+            types.Tool(
+                name="scan_state",
+                description="Return the current incremental scan state: a map of file_path → {sha256, last_scan_ts, findings_count, catalog_version}. Use to inspect which files would be skipped on the next atr_scan_path call.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            types.Tool(
+                name="clear_scan_state",
+                description="Clear the incremental scan cache, forcing the next atr_scan_path call to rescan all files from scratch.",
+                inputSchema={"type": "object", "properties": {}},
             ),
             types.Tool(
                 name="store_findings",
@@ -1850,6 +1999,21 @@ if Server is not None:
                         },
                     },
                     "required": ["findings"],
+                },
+            ),
+            types.Tool(
+                name="classify_trust",
+                description="Classify discover_targets items into trust tiers (verified/community/unknown) based on publisher provenance and return recommended scan depth per target. Verified (official publishers like Anthropic/Google/OpenAI): ATR-only. Community (known publisher): ATR + Trivy. Unknown (local/unsigned): full scan (ATR + Trivy + LLM + Python AST). Returns {targets: [{...original, trust_tier, publisher, scan_depth}], summary}.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "targets": {
+                            "type": "array",
+                            "description": "List of target items from discover_targets output.",
+                            "items": {"type": "object"},
+                        },
+                    },
+                    "required": ["targets"],
                 },
             ),
         ]
@@ -1976,6 +2140,12 @@ if Server is not None:
 
         if name == "atr_update":
             result = atr_catalog.update_catalog()
+            if result.get("ok"):
+                try:
+                    if os.path.isfile(SCAN_STATE_PATH):
+                        os.unlink(SCAN_STATE_PATH)
+                except OSError:
+                    pass
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "atr_match":
@@ -2022,7 +2192,16 @@ if Server is not None:
                 extensions=arguments.get("extensions"),
                 time_budget_seconds=arguments.get("time_budget_seconds"),
                 max_files=arguments.get("max_files"),
+                incremental=arguments.get("incremental", True),
             )
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "scan_state":
+            result = get_scan_state()
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "clear_scan_state":
+            result = clear_scan_state()
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "store_findings":
@@ -2057,6 +2236,10 @@ if Server is not None:
 
         if name == "compute_risk_score":
             result = compute_risk_score(findings=arguments.get("findings") or [])
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "classify_trust":
+            result = classify_trust(targets=arguments.get("targets") or [])
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         raise ValueError(f"Unknown tool: {name}")
