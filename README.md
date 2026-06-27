@@ -75,6 +75,44 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 
 `--clean` wipes the entire `~/.tomofound/` directory after a 5-second confirm window. The MCP server registration in `claude_desktop_config.json` / `~/.codex/config.toml` is re-written either way.
 
+## Troubleshooting
+
+### MCP server won't start / dies immediately
+
+- Verify Python 3.10+: `~/.tomofound/venv/bin/python --version`
+- Check the MCP SDK is installed: `~/.tomofound/venv/bin/pip list | grep -i mcp`
+- Re-run `setup.sh` to refresh server files and let the bootstrap reinstall dependencies on next start.
+
+### Trivy download fails / times out
+
+- Check network connectivity and proxy settings — the installer fetches Trivy from `github.com`.
+- Install Trivy manually (`brew install trivy` or download from [GitHub releases](https://github.com/aquasecurity/trivy/releases)) and ensure it is on `PATH`.
+- If the SHA-256 verification fails, retry the download; persistent failures suggest a network integrity issue (transparent proxy, captive portal).
+
+### ATR catalog not downloading
+
+- Confirm you can reach `github.com` (the catalog is fetched from the Agent-Threat-Rule repo).
+- Manually trigger a refresh by invoking the `atr_update` MCP tool.
+- Check available disk space in `~/.tomofound/` — the catalog needs a few MB.
+
+### Scan hangs or takes too long
+
+- Pass `time_budget_seconds` to `atr_scan_path` to cap scan time (e.g. 60 seconds).
+- Scan individual plugin directories rather than an entire `~/.claude/` tree at once.
+- If a scan returns `budget_exceeded`, re-invoke on a narrower path.
+
+### "No findings" but expected results
+
+- Check the ATR catalog is installed by invoking the `atr_status` tool — if the catalog is missing, run `atr_update` first.
+- Verify the target path exists and contains scannable files by running the `discover_targets` tool.
+- Ensure extensions are installed in their standard locations (`~/.claude/`, `~/.codex/`, `~/.gemini/`).
+
+### setup.sh errors
+
+- **"Not macOS"**: tomofound currently supports macOS only; Linux support is planned.
+- **Permission denied**: check ownership of `~/.tomofound/` (`ls -la ~/.tomofound`).
+- For a clean slate, re-run setup.sh with `--clean` to wipe and recreate the installation directory.
+
 ### Uninstall
 
 ```bash
