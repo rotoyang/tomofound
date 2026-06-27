@@ -40,6 +40,15 @@ _RISKY_ATTRS = {
 
 _SUBPROCESS_FUNCS = {"run", "call", "Popen", "check_call", "check_output"}
 
+# SSRF sinks — requests methods whose first positional arg is a URL.
+_REQUESTS_METHODS = {"get", "post", "put", "delete", "patch", "head", "options"}
+
+# SQL execution methods (called on cursor / connection objects).
+_SQL_EXEC_METHODS = {"execute", "executemany", "executescript"}
+
+# LDAP search methods whose *filter* argument may be injectable.
+_LDAP_SEARCH_METHODS = {"search", "search_s", "search_st", "search_ext", "search_ext_s"}
+
 _TAINT_SOURCE_ATTRS = {
     ("os",  "environ"),
     ("os",  "getenv"),
@@ -289,6 +298,97 @@ class _TaintVisitor:
                 if _has_shell_true(node) and node.args and self._is_tainted(node.args[0]):
                     self._add("critical", node.lineno,
                               f"Tainted data flows into subprocess.{attr}(shell=True) — shell injection")
+            # --- SSRF: urllib.request.urlopen(tainted_url) ---
+            elif (mod, attr) == ("request", "urlopen") or \
+                 (mod == "urllib" and attr == "urlopen"):
+                if node.args and self._is_tainted(node.args[0]):
+                    self._add("high", node.lineno,
+                              f"Tainted data flows into {mod}.{attr}() — SSRF")
+            # --- SSRF: requests.get/post/…(tainted_url) ---
+            elif mod == "requests" and attr in _REQUESTS_METHODS:
+                if node.args and self._is_tainted(node.args[0]):
+                    self._add("high", node.lineno,
+                              f"Tainted data flows into requests.{attr}() — SSRF")
+            # --- LDAP injection: ldap.search*(…, tainted_filter) ---
+            elif mod == "ldap" and attr in _LDAP_SEARCH_METHODS:
+                self._check_ldap_filter(node, attr)
+        # --- SQL injection: <var>.execute(tainted_query) ---
+        # The receiver can be any name (cursor, conn, db, etc.), so we
+        # only check the method name + whether the query arg is tainted AND
+        # built via string formatting/concatenation (to avoid false positives
+        # on parameterized queries).
+        if isinstance(func, ast.Attribute) and func.attr in _SQL_EXEC_METHODS:
+            if node.args and self._is_tainted_sql(node.args[0]):
+                self._add("high", node.lineno,
+                          f"Tainted data flows into .{func.attr}() via string formatting — SQL injection")
+
+    def _is_tainted_sql(self, node) -> bool:
+        """Return True when a node is both tainted AND built via string
+        formatting / concatenation — the hallmark of an injectable SQL query.
+        Plain tainted variables that are passed with parameterized placeholders
+        (``cursor.execute("SELECT ?", (val,))``) are NOT flagged."""
+        if isinstance(node, ast.JoinedStr):
+            # f-string — tainted if any interpolated value is tainted
+            return any(
+                isinstance(v, ast.FormattedValue) and self._is_tainted(v.value)
+                for v in node.values
+            )
+        if isinstance(node, ast.BinOp):
+            if isinstance(node.op, ast.Mod):
+                # "SELECT %s" % val  — tainted if either side is
+                return self._is_tainted(node.left) or self._is_tainted(node.right)
+            if isinstance(node.op, ast.Add):
+                # "SELECT " + val
+                return self._is_tainted(node.left) or self._is_tainted(node.right)
+        if isinstance(node, ast.Call):
+            # "SELECT {}".format(val)
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "format":
+                if any(self._is_tainted(a) for a in node.args):
+                    return True
+                if any(kw.value and self._is_tainted(kw.value) for kw in node.keywords):
+                    return True
+        if isinstance(node, ast.Name) and node.id in self.tainted:
+            # A variable — only flag if we can tell from the assignment it was
+            # built via formatting.  Walk the function body to find the
+            # assignment and check the RHS.
+            rhs = self._find_last_assignment(node.id)
+            if rhs is not None:
+                return self._is_tainted_sql(rhs)
+        return False
+
+    def _find_last_assignment(self, name: str):
+        """Return the RHS node of the last assignment to *name* within the
+        current function scope, or ``None`` if not found."""
+        last = None
+        for n in self._scope_nodes(self.function):
+            if isinstance(n, ast.Assign):
+                for tgt in n.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id == name:
+                        last = n.value
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == name:
+                if n.value is not None:
+                    last = n.value
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and n.target.id == name:
+                # For AugAssign we treat the whole thing as a BinOp
+                last = ast.BinOp(left=ast.Name(id=name), op=n.op, right=n.value)
+        return last
+
+    def _check_ldap_filter(self, node: ast.Call, attr: str):
+        """Check LDAP search calls for tainted filter arguments.
+
+        ``ldap.search_s(base, scope, filterstr, ...)`` — filterstr is the 3rd
+        positional arg (index 2), or the ``filterstr`` keyword arg."""
+        filter_node = None
+        if len(node.args) >= 3:
+            filter_node = node.args[2]
+        else:
+            for kw in node.keywords:
+                if kw.arg == "filterstr":
+                    filter_node = kw.value
+                    break
+        if filter_node is not None and self._is_tainted(filter_node):
+            self._add("high", node.lineno,
+                      f"Tainted data flows into ldap.{attr}() filter — LDAP injection")
 
     def _is_tainted(self, node) -> bool:
         if isinstance(node, ast.Name):
