@@ -12,6 +12,8 @@ from server.trivy_server import (
     extract_zip, to_sarif, ZIP_MEMBER_LIMIT,
     store_findings, generate_report, scan_all, _scan_sessions, compute_risk_score,
     normalize_trivy, REPORTS_DIR,
+    classify_trust, _extract_publisher, _KNOWN_OFFICIAL_PUBLISHERS,
+    _SCAN_DEPTH_BY_TIER,
 )
 
 
@@ -1888,3 +1890,104 @@ def test_atr_update_invalidates_scan_state(tmp_path, monkeypatch):
     branch = parts[1].split('if name ==', 1)[0]
     assert "SCAN_STATE_PATH" in branch
     assert "os.unlink" in branch
+
+
+# ── classify_trust / trust tiers ─────────────────────────────────────────
+
+
+def test_classify_trust_official_publisher_is_verified():
+    targets = [{"path": "/p", "tag": "CODE", "source_type": "plugin",
+                "plugin": "anthropic/mcp-server"}]
+    r = classify_trust(targets)
+    assert r["targets"][0]["trust_tier"] == "verified"
+    assert r["targets"][0]["publisher"] == "anthropic"
+    assert r["targets"][0]["scan_depth"]["trivy"] is False
+    assert r["targets"][0]["scan_depth"]["llm_analysis"] is False
+    assert r["summary"]["verified"] == 1
+
+
+def test_classify_trust_community_publisher():
+    targets = [{"path": "/p", "tag": "CODE", "source_type": "plugin",
+                "plugin": "some-dev/cool-plugin"}]
+    r = classify_trust(targets)
+    assert r["targets"][0]["trust_tier"] == "community"
+    assert r["targets"][0]["scan_depth"]["trivy"] is True
+    assert r["targets"][0]["scan_depth"]["llm_analysis"] is False
+    assert r["summary"]["community"] == 1
+
+
+def test_classify_trust_unknown_no_publisher():
+    targets = [{"path": "/p", "tag": "SKILL", "source_type": "skill",
+                "plugin": "my-local-skill"}]
+    r = classify_trust(targets)
+    assert r["targets"][0]["trust_tier"] == "unknown"
+    assert r["targets"][0]["scan_depth"]["trivy"] is True
+    assert r["targets"][0]["scan_depth"]["llm_analysis"] is True
+    assert r["targets"][0]["scan_depth"]["python_ast"] is True
+    assert r["summary"]["unknown"] == 1
+
+
+def test_classify_trust_null_plugin_is_unknown():
+    targets = [{"path": "/p", "tag": "CONFIG", "source_type": "config",
+                "plugin": None}]
+    r = classify_trust(targets)
+    assert r["targets"][0]["trust_tier"] == "unknown"
+
+
+def test_classify_trust_mixed_targets():
+    targets = [
+        {"path": "/a", "tag": "CODE", "source_type": "plugin",
+         "plugin": "anthropic/fs"},
+        {"path": "/b", "tag": "CODE", "source_type": "plugin",
+         "plugin": "community-dev/tool"},
+        {"path": "/c", "tag": "SKILL", "source_type": "skill",
+         "plugin": "local-skill"},
+    ]
+    r = classify_trust(targets)
+    assert r["summary"] == {"verified": 1, "community": 1, "unknown": 1}
+
+
+def test_classify_trust_preserves_original_fields():
+    original = {"path": "/p", "tag": "CODE", "source_type": "plugin",
+                "plugin": "google/search"}
+    r = classify_trust([original])
+    t = r["targets"][0]
+    assert t["path"] == "/p"
+    assert t["tag"] == "CODE"
+    assert "trust_tier" not in original
+
+
+def test_classify_trust_empty_input():
+    r = classify_trust([])
+    assert r["targets"] == []
+    assert r["summary"] == {"verified": 0, "community": 0, "unknown": 0}
+
+
+def test_classify_trust_case_insensitive_publisher():
+    targets = [{"path": "/p", "tag": "CODE", "source_type": "plugin",
+                "plugin": "Anthropic/server"}]
+    r = classify_trust(targets)
+    assert r["targets"][0]["trust_tier"] == "verified"
+
+
+def test_classify_trust_openai_bundled_is_verified():
+    targets = [{"path": "/p", "tag": "CODE", "source_type": "plugin",
+                "plugin": "openai-bundled/browser"}]
+    r = classify_trust(targets)
+    assert r["targets"][0]["trust_tier"] == "verified"
+
+
+def test_extract_publisher_with_slash():
+    assert _extract_publisher("anthropic/mcp-server") == "anthropic"
+
+
+def test_extract_publisher_no_slash():
+    assert _extract_publisher("local-skill") is None
+
+
+def test_extract_publisher_none():
+    assert _extract_publisher(None) is None
+
+
+def test_extract_publisher_case_normalized():
+    assert _extract_publisher("Google/sheets-plugin") == "google"
