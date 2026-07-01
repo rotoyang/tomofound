@@ -1,5 +1,19 @@
 # tomofound
 
+> *tomo* (友) — friend, ally · *found* — to discover, to establish
+
+We are entering an era where AI assistants do not work alone. They call tools, run plugins, load skills, and extend their reach through connectors built by developers around the world. This power is extraordinary — and so is the trust we place in it every time we install an extension.
+
+**tomofound** was born from a simple belief: no one should have to navigate that trust alone.
+
+The name carries two meanings at once. *Tomo* (友) is the Japanese word for friend — an ally who walks beside you, watches your back, and tells you the truth. *Found* speaks to discovery and to building something that lasts. Together they describe what this tool aspires to be: not a gatekeeper, but a companion that surveys the landscape with you, flags what it finds, and helps you decide with confidence.
+
+Security has always been a collective endeavor. The threat intelligence here — ATR catalog rules, CVE databases, OSV advisories — exists because countless researchers shared what they discovered. This project exists because contributors gave their time and judgment. Every new threat pattern added, every edge case reported, every idea offered makes the next user a little safer.
+
+If you work with AI tools and care about the people who use them, **you are already part of this**. Open an issue. Propose a rule. Share a finding. The more voices that join, the stronger the signal becomes — and the safer AI becomes for everyone.
+
+---
+
 Security scanner for AI tool plugins, skills, and connectors.
 
 Scans extensions installed for Claude Code, Gemini CLI, and Codex CLI for secrets, backdoors, data exfiltration, supply-chain vulnerabilities, prompt injection, MCP tool poisoning, and memory poisoning — before or after installation. Combines Trivy CVE/secret scanning, Python AST + taint-tracking static analysis, and optional LLM semantic review, then emits a 0–100 risk score with an install recommendation.
