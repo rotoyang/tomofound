@@ -401,16 +401,42 @@ def _build_rule_entry(raw: dict, path: str) -> dict | None:
 
 # --- Match flow -------------------------------------------------------------
 
+# In-memory catalog cache. Keyed on (mtime_ns, size) of the parsed-catalog
+# file so an atr_update (which rewrites the file) invalidates it naturally.
+# Compiled regex objects are attached to each pattern at load time — with
+# 670+ rules the stdlib re module's internal 512-entry cache thrashes, so
+# every re.search(pattern_string, ...) would silently recompile.
+_CATALOG_MEM: dict | None = None
+_CATALOG_MEM_KEY: tuple | None = None
+
+
 def _load_catalog() -> dict | None:
-    """Read the persisted catalog from disk. Returns None if it isn't cached
-    yet (the caller should advise the user to run `atr_update`)."""
-    if not os.path.isfile(PARSED_CATALOG_PATH):
+    """Read the persisted catalog from disk (memoized per file version).
+    Returns None if it isn't cached yet (the caller should advise the user
+    to run `atr_update`). Each pattern dict gains a `compiled` key holding
+    the pre-compiled regex object."""
+    global _CATALOG_MEM, _CATALOG_MEM_KEY
+    try:
+        stat = os.stat(PARSED_CATALOG_PATH)
+    except OSError:
         return None
+    key = (PARSED_CATALOG_PATH, stat.st_mtime_ns, stat.st_size)
+    if _CATALOG_MEM is not None and _CATALOG_MEM_KEY == key:
+        return _CATALOG_MEM
     try:
         with open(PARSED_CATALOG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            catalog = json.load(f)
     except Exception:
         return None
+    for rule in catalog.get("rules", []):
+        for pat in rule.get("patterns", []):
+            try:
+                pat["compiled"] = re.compile(pat["pattern"])
+            except (re.error, KeyError, TypeError):
+                pat["compiled"] = None
+    _CATALOG_MEM = catalog
+    _CATALOG_MEM_KEY = key
+    return catalog
 
 
 def catalog_status() -> dict:
@@ -430,6 +456,38 @@ def catalog_status() -> dict:
         }
     except Exception as e:
         return {"available": False, "reason": f"catalog meta unreadable: {e}"}
+
+
+ATR_LATEST_PROBE_URL = (
+    "https://api.github.com/repos/Agent-Threat-Rule/agent-threat-rules/releases/latest"
+)
+
+
+def check_upstream_freshness(timeout: float = 10.0) -> dict:
+    """Network probe: compare ATR_PIN against the latest upstream release tag.
+
+    Opt-in only — callers must explicitly request it (catalogs_status
+    check_upstream=true). Never raises; on any failure returns
+    {checked: false, reason} so report rendering degrades gracefully.
+    This only *reports* drift — it never triggers a download. Updating
+    stays an explicit, reviewed pin bump (see the _TRIVY_PIN rationale in
+    trivy_server.py: floating-latest is a supply-chain liability)."""
+    try:
+        req = urllib.request.Request(
+            ATR_LATEST_PROBE_URL,
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read(1024 * 1024))
+        latest = str(data.get("tag_name") or "")
+    except Exception as e:
+        return {"checked": False, "reason": str(e), "pinned": ATR_PIN}
+    return {
+        "checked": True,
+        "pinned": ATR_PIN,
+        "upstream_latest": latest,
+        "update_available": bool(latest) and latest != ATR_PIN,
+    }
 
 
 def match_content(
@@ -575,8 +633,13 @@ def _match_against_catalog(
         if deadline is not None and time.monotonic() >= deadline:
             return findings
         for pat in rule.get("patterns", []):
+            compiled = pat.get("compiled")
             try:
-                m = re.search(pat["pattern"], content)
+                # Prefer the object pre-compiled at catalog load; fall back to
+                # re.search on the raw string for catalogs built by hand in
+                # tests (or any caller that bypassed _load_catalog).
+                m = compiled.search(content) if compiled is not None \
+                    else re.search(pat["pattern"], content)
             except re.error:
                 continue
             if not m:

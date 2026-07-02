@@ -254,6 +254,7 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `https://raw.githubusercontent.com/rotoyang/tomofound/main/...` | Installer fetches its own source | `setup.sh` only |
 | `https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v3.5.4/LICENSE` | Re-verify ATR upstream license before trusting a catalog refresh | The `atr_update` MCP tool |
 | `https://github.com/Agent-Threat-Rule/agent-threat-rules/archive/refs/tags/v3.5.4.tar.gz` | Download the pinned ATR source tarball | The `atr_update` MCP tool — user-initiated only, never auto-run |
+| `https://api.github.com/repos/Agent-Threat-Rule/agent-threat-rules/releases/latest` | Report whether a newer ATR release exists than our pin (never downloads) | The `catalogs_status` MCP tool — only when called with `check_upstream: true`; local-only by default |
 
 ### Repository assets
 

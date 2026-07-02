@@ -592,14 +592,19 @@ After all analyses are complete:
 
    ```
    Call MCP tool: catalogs_status
+     check_upstream: true
    ```
+
+   `check_upstream: true` adds one bounded HTTP probe that compares our pinned
+   ATR version against the latest upstream release. If it fails (offline), the
+   response degrades gracefully — render the header without the drift note.
 
    The tool returns `{ "catalogs": [ {source, name, mode, available, version?, license, attribution, ...}, ... ] }` — one entry per source the scanner consults (ATR, OSV, Trivy). Render this as a freshness block at the very top of the report so the user can see at a glance which catalogs were used and what version. Per-catalog rendering rules:
 
    - `available: true` → `✅ <name> <version_or_mode_label> (<license> — <attribution>)`
    - `available: false` → `⚠️ <name> — <reason or hint>`
 
-   For `atr`, include `rules_compiled` if present (e.g. `652 rules`). For `osv`, label as `live API`. For `trivy`, include `binary_version` and `db_updated_at` if present. The header block goes immediately after the title, before `**Scanned:**`.
+   For `atr`, include `rules_compiled` if present (e.g. `672 rules`). If the ATR entry carries `upstream.update_available: true`, append a drift note on the ATR line: `— ⬆️ upstream has <upstream_latest> (we pin <pinned>); a newer tomofound release may include it`. For `osv`, label as `live API`. For `trivy`, include `binary_version` and `db_updated_at` if present. The header block goes immediately after the title, before `**Scanned:**`.
 
    Render the Markdown report (template below; substitute the catalogs block in place of `<CATALOGS_BLOCK>`):
 

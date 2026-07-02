@@ -897,15 +897,19 @@ def _atr_status() -> dict:
     return descriptor
 
 
-def catalogs_status() -> dict:
+def catalogs_status(check_upstream: bool = False) -> dict:
     """Aggregated freshness status for every catalog / source that contributes
-    to scan findings. Used by report headers. Never blocks on network: each
-    sub-probe is local-only (file reads, locally-installed binary version
-    probe) — the only thing that runs an external HTTP call is the user-
-    initiated atr_update."""
+    to scan findings. Used by report headers. Local-only by default: each
+    sub-probe is file reads / locally-installed binary version probe. Pass
+    check_upstream=True to additionally probe the ATR upstream repo for a
+    newer release than our pin — one bounded HTTP call, never raises, and
+    never downloads anything (updating stays an explicit pin bump)."""
+    atr = _atr_status()
+    if check_upstream:
+        atr["upstream"] = atr_catalog.check_upstream_freshness()
     return {
         "catalogs": [
-            _atr_status(),
+            atr,
             _osv_status(),
             _trivy_status(),
         ],
@@ -1868,8 +1872,16 @@ if Server is not None:
             ),
             types.Tool(
                 name="catalogs_status",
-                description="Aggregated freshness status for every catalog / source the scanner consults — ATR (local), OSV (live API), Trivy (managed binary). Returns {catalogs: [{source, name, mode, available, version?, license, attribution, ...}, ...]}. The skill renders this into every scan report's header so the user can see at a glance what catalogs were used, what version, and what license. Never blocks on network — each probe is local-only.",
-                inputSchema={"type": "object", "properties": {}},
+                description="Aggregated freshness status for every catalog / source the scanner consults — ATR (local), OSV (live API), Trivy (managed binary). Returns {catalogs: [{source, name, mode, available, version?, license, attribution, ...}, ...]}. The skill renders this into every scan report's header so the user can see at a glance what catalogs were used, what version, and what license. Local-only by default; pass check_upstream=true to also probe the ATR upstream repo for a newer release than the pin (adds `upstream: {checked, pinned, upstream_latest, update_available}` to the ATR entry — reports drift only, never downloads).",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "check_upstream": {
+                            "type": "boolean",
+                            "description": "Also probe the ATR upstream repo (one bounded HTTP call) and report whether a newer release than our pin exists. Default false — keeps the call fully offline.",
+                        },
+                    },
+                },
             ),
             types.Tool(
                 name="atr_scan_path",
@@ -2180,7 +2192,12 @@ if Server is not None:
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "catalogs_status":
-            result = catalogs_status()
+            # check_upstream=true adds one bounded HTTP probe — run on a
+            # worker thread so the network wait can't stall the event loop.
+            result = await asyncio.to_thread(
+                catalogs_status,
+                check_upstream=arguments.get("check_upstream", False),
+            )
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "atr_scan_path":
