@@ -180,11 +180,7 @@ def test_find_or_install_trivy_refuses_when_checksums_missing(tmp_path, monkeypa
     monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", str(tmp_path / "trivy"))
     monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path))
 
-    release_json = json.dumps({"tag_name": "v0.59.0"}).encode()
-
     def _urlopen(url, timeout=None):
-        if "/releases/latest" in url:
-            return _CapturingUrlopen._FakeResponse(release_json)
         if "/checksums.txt" in url:
             raise RuntimeError("checksums fetch failed (simulated)")
         raise RuntimeError(f"unexpected: {url}")
@@ -198,19 +194,18 @@ def test_find_or_install_trivy_refuses_when_checksums_missing(tmp_path, monkeypa
 
 
 def test_find_or_install_trivy_refuses_on_checksum_mismatch(tmp_path, monkeypatch):
+    from server.trivy_server import _TRIVY_PIN
     monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", str(tmp_path / "trivy"))
     monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path))
 
-    release_json = json.dumps({"tag_name": "v0.59.0"}).encode()
+    archive_name = f"trivy_{_TRIVY_PIN}_macOS-ARM64.tar.gz"
     archive_bytes = b"not the real trivy archive"
-    checksums = "z" * 64 + "  trivy_0.59.0_macOS-ARM64.tar.gz\n"  # 'z'*64 won't match
+    checksums = "z" * 64 + f"  {archive_name}\n"  # 'z'*64 won't match
 
     def _urlopen(url, timeout=None):
-        if "/releases/latest" in url:
-            return _CapturingUrlopen._FakeResponse(release_json)
         if url.endswith("checksums.txt"):
             return _CapturingUrlopen._FakeResponse(checksums)
-        if url.endswith("trivy_0.59.0_macOS-ARM64.tar.gz"):
+        if url.endswith(archive_name):
             return _CapturingUrlopen._FakeResponse(archive_bytes)
         raise RuntimeError(f"unexpected: {url}")
 
@@ -225,16 +220,14 @@ def test_find_or_install_trivy_refuses_on_checksum_mismatch(tmp_path, monkeypatc
 
 
 def test_find_or_install_trivy_refuses_when_archive_not_in_checksums(tmp_path, monkeypatch):
+    from server.trivy_server import _TRIVY_PIN
     monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", str(tmp_path / "trivy"))
     monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path))
 
-    release_json = json.dumps({"tag_name": "v0.59.0"}).encode()
     # Checksums file lists a DIFFERENT archive — ours isn't there.
-    checksums = "a" * 64 + "  trivy_0.59.0_Linux-64bit.tar.gz\n"
+    checksums = "a" * 64 + f"  trivy_{_TRIVY_PIN}_Linux-64bit.tar.gz\n"
 
     def _urlopen(url, timeout=None):
-        if "/releases/latest" in url:
-            return _CapturingUrlopen._FakeResponse(release_json)
         if url.endswith("checksums.txt"):
             return _CapturingUrlopen._FakeResponse(checksums)
         raise RuntimeError(f"should not have downloaded archive: {url}")
@@ -245,6 +238,33 @@ def test_find_or_install_trivy_refuses_when_archive_not_in_checksums(tmp_path, m
          patch("platform.machine", return_value="arm64"):
         result = find_or_install_trivy()
     assert result is None
+
+
+def test_find_or_install_trivy_uses_pin_never_releases_latest(tmp_path, monkeypatch):
+    """Supply-chain guard: the install path must resolve the version from
+    _TRIVY_PIN, never from the mutable `releases/latest` endpoint. Trivy's
+    March 2026 incident (malicious release published with matching
+    checksums) is exactly the attack a floating-latest install cannot
+    survive."""
+    from server.trivy_server import _TRIVY_PIN
+    monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", str(tmp_path / "trivy"))
+    monkeypatch.setattr("server.trivy_server.TOOLS_DIR", str(tmp_path))
+
+    seen_urls = []
+
+    def _urlopen(url, timeout=None):
+        seen_urls.append(url)
+        raise RuntimeError("stop after recording URL")
+
+    with patch("shutil.which", return_value=None), \
+         patch("urllib.request.urlopen", side_effect=_urlopen), \
+         patch("platform.system", return_value="Darwin"), \
+         patch("platform.machine", return_value="arm64"):
+        find_or_install_trivy()
+
+    assert seen_urls, "expected at least one fetch attempt"
+    assert not any("/releases/latest" in u for u in seen_urls)
+    assert all(_TRIVY_PIN in u for u in seen_urls)
 
 
 # --- query_osv ---
