@@ -1057,6 +1057,36 @@ def test_catalogs_status_includes_all_three_sources(monkeypatch):
         assert "mode" in c
 
 
+def test_catalogs_status_default_is_offline(monkeypatch):
+    """Without check_upstream, catalogs_status must never touch the network."""
+    monkeypatch.setattr("server.trivy_server.shutil.which", lambda _: None)
+    monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", "/nonexistent/trivy")
+
+    def _boom(*a, **k):
+        raise AssertionError("network probe attempted on default call")
+
+    monkeypatch.setattr(
+        "server.trivy_server.atr_catalog.check_upstream_freshness", _boom
+    )
+    result = catalogs_status()
+    atr_entry = result["catalogs"][0]
+    assert "upstream" not in atr_entry
+
+
+def test_catalogs_status_check_upstream_adds_drift_info(monkeypatch):
+    monkeypatch.setattr("server.trivy_server.shutil.which", lambda _: None)
+    monkeypatch.setattr("server.trivy_server.TOOLS_TRIVY", "/nonexistent/trivy")
+    monkeypatch.setattr(
+        "server.trivy_server.atr_catalog.check_upstream_freshness",
+        lambda: {"checked": True, "pinned": "v1", "upstream_latest": "v2",
+                 "update_available": True},
+    )
+    result = catalogs_status(check_upstream=True)
+    atr_entry = result["catalogs"][0]
+    assert atr_entry["upstream"]["update_available"] is True
+    assert atr_entry["upstream"]["upstream_latest"] == "v2"
+
+
 from server.trivy_server import compute_risk_score
 
 
@@ -1739,6 +1769,7 @@ _BLOCKING_DISPATCHES = [
     ("extract_zip", 'if name == "analyze_python":'),
     ("analyze_python", 'if name == "to_sarif":'),
     ("atr_match", 'if name == "atr_status":'),
+    ("catalogs_status", 'if name == "atr_scan_path":'),
     ("atr_scan_path", 'if name == "store_findings":'),
     ("generate_report", 'if name == "scan_all":'),
     ("scan_all", 'if name == "compute_risk_score":'),
