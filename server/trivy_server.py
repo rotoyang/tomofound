@@ -10,7 +10,7 @@ VENV = os.path.expanduser("~/.tomofound/venv")
 # from upstream can ship; pin upper bounds at the next major to block
 # breaking changes.
 _PIP_DEPS = [
-    "mcp==1.28.0",
+    "mcp==1.28.1",
     "PyYAML>=6.0,<7",
 ]
 _MCP_PIN = _PIP_DEPS[0]  # back-compat name for any external reader of the constant
@@ -18,7 +18,7 @@ _MCP_PIN = _PIP_DEPS[0]  # back-compat name for any external reader of the const
 # Bump this string when _PIP_DEPS changes so existing venvs auto-reinstall the
 # new set on next server start. The bootstrap writes the current value to
 # ~/.tomofound/venv/.tomofound-deps; mismatch triggers a pip install --upgrade.
-_DEPS_VERSION = "2"
+_DEPS_VERSION = "3"
 
 
 def _bootstrap():
@@ -267,6 +267,15 @@ def _source_type(path: str, tag: str) -> str:
 _TRIVY_DOWNLOAD_TIMEOUT_SEC = 300  # 5 min — Trivy binary tarball is ~50 MB
 _TRIVY_DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024  # 200 MB hard cap
 
+# Pinned Trivy release. We deliberately do NOT install `releases/latest`:
+# Trivy suffered a supply-chain incident in March 2026 (malicious v0.69.4
+# release published with matching checksums), so checksum verification alone
+# cannot protect a floating-latest install. Bumping this pin is an explicit,
+# reviewed change — update the README Supply chain table in the same PR
+# (see CLAUDE.md). The CVE *database* Trivy consults still auto-updates
+# independently of the binary version, so scan results stay current.
+_TRIVY_PIN = "0.72.0"
+
 
 def _hash_file_sha256(path: str) -> str:
     import hashlib
@@ -365,12 +374,7 @@ def find_or_install_trivy() -> str | None:
         return TOOLS_TRIVY
 
     try:
-        with urllib.request.urlopen(
-            "https://api.github.com/repos/aquasecurity/trivy/releases/latest",
-            timeout=30,
-        ) as resp:
-            data = json.loads(resp.read())
-        version = data["tag_name"].lstrip("v")
+        version = _TRIVY_PIN
         system = platform.system()
         machine = platform.machine().lower()
         if system == "Darwin":
