@@ -3,7 +3,13 @@
 
 import sys, os
 
-VENV = os.path.expanduser("~/.tomofound/venv")
+# Build with os.path.join, NOT expanduser("~/.tomofound/venv"): on Windows
+# expanduser keeps the literal's forward slashes (C:\Users\u/.tomofound/venv),
+# and the startswith(VENV) re-exec guard below would never match the native
+# backslash sys.executable — an infinite respawn loop.
+VENV = os.path.join(os.path.expanduser("~"), ".tomofound", "venv")
+_VENV_BIN = "Scripts" if os.name == "nt" else "bin"
+_EXE = ".exe" if os.name == "nt" else ""
 
 # Pinned dependencies — when bumping any entry, also update the Supply chain
 # table in README.md (see CLAUDE.md). Use lower bounds so security patches
@@ -22,7 +28,7 @@ _DEPS_VERSION = "3"
 
 
 def _bootstrap():
-    venv_python = os.path.join(VENV, "bin", "python")
+    venv_python = os.path.join(VENV, _VENV_BIN, "python" + _EXE)
     marker = os.path.join(VENV, ".tomofound-deps")
     deps_current = None
     if os.path.isfile(marker):
@@ -37,7 +43,7 @@ def _bootstrap():
         if not os.path.exists(venv_python):
             subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
         subprocess.run(
-            [os.path.join(VENV, "bin", "pip"), "install", *_PIP_DEPS,
+            [os.path.join(VENV, _VENV_BIN, "pip" + _EXE), "install", *_PIP_DEPS,
              "--upgrade", "--quiet"],
             check=True,
         )
@@ -47,7 +53,14 @@ def _bootstrap():
         except OSError:
             pass  # marker is an optimisation, not a correctness gate
 
-    if not sys.executable.startswith(VENV):
+    if not os.path.normcase(sys.executable).startswith(os.path.normcase(VENV)):
+        if os.name == "nt":
+            # os.execv on Windows spawns a detached child and returns in the
+            # parent, which tears down the stdio pipes an MCP server lives
+            # on. Run the venv interpreter as a child with inherited stdio
+            # and mirror its exit code instead.
+            import subprocess
+            raise SystemExit(subprocess.call([venv_python] + sys.argv))
         os.execv(venv_python, [venv_python] + sys.argv)
 
 
@@ -61,9 +74,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from python_analyzer import analyze_python  # noqa: E402
 import atr_catalog  # noqa: E402
 
-DATA_ROOT = os.path.expanduser("~/.tomofound")
+
+def _home_path(*parts: str) -> str:
+    """Native-separator path under the user's home directory.
+
+    Never build prefix constants with expanduser("~/x/y"): on Windows that
+    keeps the literal's forward slashes (C:\\Users\\u/x/y) while os.walk /
+    abspath / realpath produce backslash paths, so every startswith()
+    comparison — including the path-safety gates — silently fails."""
+    return os.path.join(os.path.expanduser("~"), *parts)
+
+
+DATA_ROOT = _home_path(".tomofound")
 TOOLS_DIR = os.path.join(DATA_ROOT, "tools")
-TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy")
+TOOLS_TRIVY = os.path.join(TOOLS_DIR, "trivy" + _EXE)
 CLONE_PREFIX = "tomofound-scan-"
 REPORTS_DIR = os.path.join(DATA_ROOT, "reports")
 SCAN_STATE_PATH = os.path.join(DATA_ROOT, "scan_state.json")
@@ -89,30 +113,30 @@ _SKILL_DIR_MARKERS = tuple(os.sep + d + os.sep for d in ("skills", "agents", "co
 
 _STANDARD_ROOTS = {
     "claude": [
-        os.path.expanduser("~/.claude/plugins/cache"),
-        os.path.expanduser("~/.claude/plugins/repos"),
-        os.path.expanduser("~/.claude/skills"),
-        os.path.expanduser("~/.claude/agents"),
-        os.path.expanduser("~/.claude/commands"),
-        os.path.expanduser("~/.claude/.mcp.json"),
-        os.path.expanduser("~/.claude/settings.json"),
-        os.path.expanduser("~/.claude/config.json"),
+        _home_path(".claude", "plugins", "cache"),
+        _home_path(".claude", "plugins", "repos"),
+        _home_path(".claude", "skills"),
+        _home_path(".claude", "agents"),
+        _home_path(".claude", "commands"),
+        _home_path(".claude", ".mcp.json"),
+        _home_path(".claude", "settings.json"),
+        _home_path(".claude", "config.json"),
     ],
     "gemini": [
-        os.path.expanduser("~/.gemini/extensions"),
-        os.path.expanduser("~/.gemini/config/plugins"),
-        os.path.expanduser("~/.gemini/commands"),
-        os.path.expanduser("~/.gemini/settings.json"),
-        os.path.expanduser("~/.gemini/oauth_creds.json"),
-        os.path.expanduser("~/.gemini/.env"),
+        _home_path(".gemini", "extensions"),
+        _home_path(".gemini", "config", "plugins"),
+        _home_path(".gemini", "commands"),
+        _home_path(".gemini", "settings.json"),
+        _home_path(".gemini", "oauth_creds.json"),
+        _home_path(".gemini", ".env"),
     ],
     "openai": [
-        os.path.expanduser("~/.codex/auth.json"),
-        os.path.expanduser("~/.codex/config.toml"),
-        os.path.expanduser("~/.codex/AGENTS.md"),
-        os.path.expanduser("~/.codex/skills"),
-        os.path.expanduser("~/.codex/plugins/cache"),
-        os.path.expanduser("~/.codex/prompts"),
+        _home_path(".codex", "auth.json"),
+        _home_path(".codex", "config.toml"),
+        _home_path(".codex", "AGENTS.md"),
+        _home_path(".codex", "skills"),
+        _home_path(".codex", "plugins", "cache"),
+        _home_path(".codex", "prompts"),
     ],
 }
 
@@ -148,16 +172,25 @@ _SCAN_DEPTH_BY_TIER: dict[str, dict] = {
 }
 
 _READ_ALLOWED_PREFIXES = [
-    os.path.expanduser("~/.claude/"),
-    os.path.expanduser("~/.gemini/"),
-    os.path.expanduser("~/.codex/"),
+    _home_path(".claude") + os.sep,
+    _home_path(".gemini") + os.sep,
+    _home_path(".codex") + os.sep,
 ]
 
 _WRITE_ALLOWED_PREFIXES = [
     DATA_ROOT + os.sep,
 ]
 
-_SENSITIVE_HOME_SUBDIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config/gh")
+_SENSITIVE_HOME_SUBDIRS = (
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker",
+    os.path.join(".config", "gh"),
+) + ((
+    # Windows-only: credential stores that live under the profile dir
+    # rather than dot-directories.
+    os.path.join("AppData", "Roaming", "GitHub CLI"),
+    os.path.join("AppData", "Local", "Microsoft", "Credentials"),
+    os.path.join("AppData", "Roaming", "Microsoft", "Credentials"),
+) if os.name == "nt" else ())
 
 _GITHUB_URL_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?$")
 
@@ -189,7 +222,7 @@ def _is_safe_root(root: str) -> bool:
 def _tag_file(path: str) -> str | None:
     name = os.path.basename(path)
     ext = os.path.splitext(name)[1].lower()
-    in_skill_dir = any(m in path for m in _SKILL_DIR_MARKERS) or path.startswith(os.path.expanduser("~/.claude/skills/"))
+    in_skill_dir = any(m in path for m in _SKILL_DIR_MARKERS) or path.startswith(_home_path(".claude", "skills") + os.sep)
     if name in _LOCKFILE_NAMES:
         return "LOCKFILE"
     if name in _MANIFEST_NAMES:
@@ -211,9 +244,9 @@ def _tag_file(path: str) -> str | None:
 
 def _plugin_from_path(path: str) -> str | None:
     nested_roots = (
-        os.path.expanduser("~/.claude/plugins/cache"),
-        os.path.expanduser("~/.claude/plugins/repos"),
-        os.path.expanduser("~/.codex/plugins/cache"),
+        _home_path(".claude", "plugins", "cache"),
+        _home_path(".claude", "plugins", "repos"),
+        _home_path(".codex", "plugins", "cache"),
     )
     for base in nested_roots:
         if path.startswith(base + os.sep):
@@ -223,21 +256,21 @@ def _plugin_from_path(path: str) -> str | None:
             if len(parts) == 1:
                 return parts[0]
 
-    gemini_ext = os.path.expanduser("~/.gemini/extensions")
+    gemini_ext = _home_path(".gemini", "extensions")
     if path.startswith(gemini_ext + os.sep):
         return path[len(gemini_ext) + 1:].split(os.sep)[0]
 
-    gemini_config_plugins = os.path.expanduser("~/.gemini/config/plugins")
+    gemini_config_plugins = _home_path(".gemini", "config", "plugins")
     if path.startswith(gemini_config_plugins + os.sep):
         return path[len(gemini_config_plugins) + 1:].split(os.sep)[0]
 
     leaf_roots = (
-        os.path.expanduser("~/.claude/skills"),
-        os.path.expanduser("~/.claude/agents"),
-        os.path.expanduser("~/.claude/commands"),
-        os.path.expanduser("~/.gemini/commands"),
-        os.path.expanduser("~/.codex/skills"),
-        os.path.expanduser("~/.codex/prompts"),
+        _home_path(".claude", "skills"),
+        _home_path(".claude", "agents"),
+        _home_path(".claude", "commands"),
+        _home_path(".gemini", "commands"),
+        _home_path(".codex", "skills"),
+        _home_path(".codex", "prompts"),
     )
     for base in leaf_roots:
         if path.startswith(base + os.sep):
@@ -247,11 +280,11 @@ def _plugin_from_path(path: str) -> str | None:
 
 def _source_type(path: str, tag: str) -> str:
     plugin_roots = (
-        os.path.expanduser("~/.claude/plugins/cache"),
-        os.path.expanduser("~/.claude/plugins/repos"),
-        os.path.expanduser("~/.gemini/extensions"),
-        os.path.expanduser("~/.gemini/config/plugins"),
-        os.path.expanduser("~/.codex/plugins/cache"),
+        _home_path(".claude", "plugins", "cache"),
+        _home_path(".claude", "plugins", "repos"),
+        _home_path(".gemini", "extensions"),
+        _home_path(".gemini", "config", "plugins"),
+        _home_path(".codex", "plugins", "cache"),
     )
     if any(path.startswith(r + os.sep) for r in plugin_roots):
         return "plugin"
@@ -378,18 +411,25 @@ def find_or_install_trivy() -> str | None:
         system = platform.system()
         machine = platform.machine().lower()
         if system == "Darwin":
-            os_name = "macOS"
+            os_name, archive_ext = "macOS", ".tar.gz"
         elif system == "Linux":
-            os_name = "Linux"
+            os_name, archive_ext = "Linux", ".tar.gz"
+        elif system == "Windows":
+            os_name, archive_ext = "windows", ".zip"
         else:
             return None
-        if machine in ("arm64", "aarch64"):
+        if system == "Windows":
+            # Trivy ships no windows-ARM64 build; require amd64.
+            if machine not in ("x86_64", "amd64"):
+                return None
+            arch = "64bit"
+        elif machine in ("arm64", "aarch64"):
             arch = "ARM64"
         elif machine in ("x86_64", "amd64"):
             arch = "64bit"
         else:
             return None
-        archive_name = f"trivy_{version}_{os_name}-{arch}.tar.gz"
+        archive_name = f"trivy_{version}_{os_name}-{arch}{archive_ext}"
         url = f"https://github.com/aquasecurity/trivy/releases/download/v{version}/{archive_name}"
 
         # Integrity: fetch Trivy's published checksums BEFORE downloading the
@@ -407,16 +447,23 @@ def find_or_install_trivy() -> str | None:
         os.makedirs(TOOLS_DIR, exist_ok=True)
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False, dir=TOOLS_DIR) as tmp:
             tmp_path = tmp.name
+        binary_name = "trivy" + _EXE
         try:
             _download_trivy_archive(url, tmp_path)
             actual_sha = _hash_file_sha256(tmp_path)
             if actual_sha != expected_sha:
                 return None  # refuse silently — caller falls back to LLM-only
-            import tarfile
-            with tarfile.open(tmp_path, "r:gz") as tf:
-                member = tf.getmember("trivy")
-                member.name = os.path.basename(member.name)
-                tf.extract(member, TOOLS_DIR)
+            if archive_ext == ".zip":
+                with zipfile.ZipFile(tmp_path) as zf:
+                    info = zf.getinfo(binary_name)
+                    info.filename = os.path.basename(info.filename)
+                    zf.extract(info, TOOLS_DIR)
+            else:
+                import tarfile
+                with tarfile.open(tmp_path, "r:gz") as tf:
+                    member = tf.getmember(binary_name)
+                    member.name = os.path.basename(member.name)
+                    tf.extract(member, TOOLS_DIR)
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)

@@ -42,7 +42,9 @@ import urllib.request
 import urllib.error
 import yaml
 
-DATA_ROOT = os.path.expanduser("~/.tomofound")
+# os.path.join (not expanduser("~/.tomofound")) so the path carries native
+# separators on Windows — see trivy_server._home_path for the full rationale.
+DATA_ROOT = os.path.join(os.path.expanduser("~"), ".tomofound")
 CATALOG_ROOT = os.path.join(DATA_ROOT, "catalogs", "atr")
 RULES_DIR = os.path.join(CATALOG_ROOT, "rules")
 LICENSE_PATH = os.path.join(CATALOG_ROOT, "LICENSE")
