@@ -1310,7 +1310,7 @@ def test_atr_scan_path_only_returns_files_with_findings(tmp_path, monkeypatch):
     assert r["files_scanned"] == 3
     assert r["files_with_findings"] == 1
     assert len(r["findings"]) == 1
-    assert r["findings"][0]["file"].endswith("/hit.md")
+    assert r["findings"][0]["file"].endswith(os.sep + "hit.md")
 
 
 def test_atr_scan_path_respects_extension_filter(tmp_path, monkeypatch):
@@ -1520,7 +1520,7 @@ def test_atr_match_dispatch_uses_to_thread_and_deadline():
     # The dispatcher lives at module top-level inside the `if Server:`
     # guard, so we inspect the source file directly rather than relying
     # on a callable. We avoid running a real MCP server in tests.
-    with open(ts.__file__, "r") as f:
+    with open(ts.__file__, "r", encoding="utf-8") as f:
         src = f.read()
     atr_match_block = src.split('if name == "atr_match":', 1)
     assert len(atr_match_block) == 2, "atr_match dispatch branch not found"
@@ -1611,7 +1611,7 @@ def test_generate_report_md_contains_finding():
         "recommendations": ["Remove eval()"],
     })
     md_path = result["files"][0]["path"]
-    with open(md_path) as f:
+    with open(md_path, encoding="utf-8") as f:
         content = f.read()
     assert "Test Report" in content
     assert "BACKDOOR" in content
@@ -1728,7 +1728,7 @@ def test_generate_report_md_includes_skipped_section():
     result = generate_report(scan_id="rpt-skip", formats=["md"])
     assert result.get("total_skipped") == 2
     md_path = result["files"][0]["path"]
-    with open(md_path) as f:
+    with open(md_path, encoding="utf-8") as f:
         content = f.read()
     assert "Incomplete Scans" in content
     assert "plugin-timeout" in content
@@ -1742,7 +1742,7 @@ def test_generate_report_json_includes_skipped():
     ])
     result = generate_report(scan_id="rpt-skip-j", formats=["json"])
     json_path = result["files"][0]["path"]
-    with open(json_path) as f:
+    with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
     assert len(data["skipped"]) == 1
     assert data["skipped"][0]["target"] == "x"
@@ -1755,7 +1755,7 @@ def test_generate_report_no_skipped_section_when_empty():
     ])
     result = generate_report(scan_id="rpt-noskip", formats=["md"])
     md_path = result["files"][0]["path"]
-    with open(md_path) as f:
+    with open(md_path, encoding="utf-8") as f:
         content = f.read()
     assert "Incomplete Scans" not in content
     assert "total_skipped" not in result
@@ -1796,7 +1796,7 @@ def test_blocking_tool_dispatch_uses_to_thread(tool_name, next_branch_marker):
     4 minutes."""
     import server.trivy_server as ts
 
-    with open(ts.__file__, "r") as f:
+    with open(ts.__file__, "r", encoding="utf-8") as f:
         src = f.read()
     parts = src.split(f'if name == "{tool_name}":', 1)
     assert len(parts) == 2, f"{tool_name} dispatch branch not found"
@@ -1946,7 +1946,7 @@ def test_scan_state_persists_across_calls(tmp_path, monkeypatch):
 def test_atr_update_invalidates_scan_state(tmp_path, monkeypatch):
     """Verify via source that atr_update dispatch clears SCAN_STATE_PATH."""
     import server.trivy_server as ts
-    with open(ts.__file__, "r") as f:
+    with open(ts.__file__, "r", encoding="utf-8") as f:
         src = f.read()
     parts = src.split('if name == "atr_update":', 1)
     assert len(parts) == 2
