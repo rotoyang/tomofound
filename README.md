@@ -22,22 +22,24 @@ Scans extensions installed for Claude Code, Gemini CLI, and Codex CLI for secret
 
 tomofound is **install once, then use it from Claude, Codex, or Gemini CLI**:
 
-1. Run `setup.sh` one time to install the MCP server and scan-rule prompt.
+1. Run `setup.sh` (macOS) or `setup.ps1` (Windows) one time to install the MCP server and scan-rule prompt.
 2. Add the scan-rule prompt as a **Skill** in Claude Desktop App (one-time drag-and-drop).
 3. From then on, type `/security-scan` in any Claude **chat** to scan — no further setup, no per-scan installation, no Trivy install (auto-handled on first scan).
 
 ## Requirements
 
-- macOS
+- macOS, or Windows 10/11
 - [Claude desktop app](https://claude.ai/download) (for Claude usage)
 - Codex (for Codex usage)
 - [Gemini CLI](https://github.com/google-gemini/gemini-cli) (for Gemini CLI usage)
-- Python 3 (preinstalled on macOS)
+- Python 3 (preinstalled on macOS). On **Windows**, a real Python **3.10+** is required — install with `winget install Python.Python.3.12` if you don't have one. The Microsoft Store "python" alias stub does **not** count (see [Troubleshooting](#windows-python-is-not-recognized--the-microsoft-store-opens)).
 - `git` on PATH (only needed when you pass a `https://github.com/...` URL)
 
 ## Installation (one-time)
 
 ### Step 1 — Run the installer
+
+#### macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash
@@ -56,11 +58,38 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash -s -- --gemini
 ```
 
+#### Windows
+
+Open PowerShell (Windows PowerShell 5.1 or PowerShell 7 both work) and run:
+
+```powershell
+irm https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.ps1 | iex
+```
+
+By default this configures Claude, Codex, and Gemini CLI. To pass flags to the remote one-liner, invoke it as a script block:
+
+```powershell
+# Claude only
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.ps1))) -Claude
+
+# Codex only
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.ps1))) -Codex
+
+# Gemini CLI only
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.ps1))) -Gemini
+```
+
+From a cloned repo, run it directly (it then copies your local working-tree files instead of downloading):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1          # or: .\setup.ps1 -Claude, -Codex, -Gemini, -Clean
+```
+
 ### Step 2 — Register the skill in Claude Desktop App
 
 1. Open Claude Desktop App.
 2. Open **Settings → Customize → Skills**.
-3. Drag `~/.tomofound/skills/security-scan/security-scan.md` into the Skills list.
+3. Drag `~/.tomofound/skills/security-scan/security-scan.md` (Windows: `%USERPROFILE%\.tomofound\skills\security-scan\security-scan.md`) into the Skills list.
 4. Quit Claude fully (**Cmd-Q**) and reopen it.
 5. Verify: type `/` in any **chat** — `/security-scan` should appear in the slash menu.
 
@@ -74,17 +103,19 @@ Restart Gemini CLI or open a new session. The `security-scan` skill is installed
 
 ### What the installer does
 
-1. Copies the MCP server (`trivy_server.py`) and the scan-rule prompt (`security-scan.md`) into `~/.tomofound/`
-2. Registers the `tomofound` MCP server in `~/Library/Application Support/Claude/claude_desktop_config.json`
+1. Copies the MCP server (`trivy_server.py`) and the scan-rule prompt (`security-scan.md`) into `~/.tomofound/` (Windows: `%USERPROFILE%\.tomofound\`)
+2. Registers the `tomofound` MCP server in `~/Library/Application Support/Claude/claude_desktop_config.json` (Windows: `%APPDATA%\Claude\claude_desktop_config.json`), merging into the existing JSON so other MCP servers are preserved
 3. Installs the Codex skill wrapper into `~/.codex/skills/security-scan/SKILL.md`
 4. Registers the `tomofound` MCP server in `~/.codex/config.toml`
 5. Installs the Gemini CLI skill wrapper into `~/.gemini/skills/security-scan/SKILL.md`
+
+On Windows, `setup.ps1` additionally verifies that a real CPython 3.10+ exists (via the `py -3` launcher, then `python` on PATH — the Microsoft Store alias stub is detected and rejected) and points the MCP server entries at that interpreter.
 
 After this, you can forget about installation — just use `/security-scan` in Claude chat, the `security-scan` skill in Codex, or the `security-scan` skill in Gemini CLI.
 
 ### Updating
 
-Re-run the same `curl | bash` command. Installation is **idempotent** — re-running is always safe. At the start the installer prints a summary of what it found at `~/.tomofound/` and what it will touch:
+Re-run the same `curl | bash` command (Windows: the same `irm … | iex` command). Installation is **idempotent** — re-running is always safe. At the start the installer prints a summary of what it found at `~/.tomofound/` and what it will touch:
 
 - **Refreshed:** server Python modules, the security-scan prompt, the MCP-server registration in Claude / Codex configs.
 - **Preserved:** the venv (its `_DEPS_VERSION` marker auto-refreshes deps on the next server start if anything changed), cached ATR catalogs, the Trivy binary, and your historical scan reports under `~/.tomofound/reports/`.
@@ -96,7 +127,12 @@ If you want a genuinely fresh install (e.g. clearing reports), use `--clean`:
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash -s -- --clean
 ```
 
-`--clean` wipes the entire `~/.tomofound/` directory after a 5-second confirm window. The MCP server registration in `claude_desktop_config.json` / `~/.codex/config.toml` is re-written either way.
+```powershell
+# Windows
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.ps1))) -Clean
+```
+
+`--clean` / `-Clean` wipes the entire `~/.tomofound/` directory after a 5-second confirm window. The MCP server registration in `claude_desktop_config.json` / `~/.codex/config.toml` is re-written either way.
 
 ## Troubleshooting
 
@@ -132,9 +168,44 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 
 ### setup.sh errors
 
-- **"Not macOS"**: tomofound currently supports macOS only; Linux support is planned.
+- **"Not macOS"**: `setup.sh` supports macOS only — on Windows use `setup.ps1` instead; Linux support is planned.
 - **Permission denied**: check ownership of `~/.tomofound/` (`ls -la ~/.tomofound`).
 - For a clean slate, re-run setup.sh with `--clean` to wipe and recreate the installation directory.
+
+### Windows: `python` is not recognized / the Microsoft Store opens
+
+Stock Windows 10/11 ships a fake `python.exe` under `%LOCALAPPDATA%\Microsoft\WindowsApps` — an "App execution alias" stub that just opens the Microsoft Store. `setup.ps1` detects and rejects it (it probes each candidate interpreter and only accepts a real CPython 3.10+, preferring the `py -3` launcher). If the installer reports no usable Python:
+
+1. Install real Python: `winget install Python.Python.3.12`
+2. Open a **new** terminal window (PATH changes don't apply to already-open ones) and re-run the installer.
+3. Optionally disable the stub under **Settings → Apps → Advanced app settings → App execution aliases** (turn off both `python.exe` and `python3.exe`).
+
+### Windows: "running scripts is disabled on this system"
+
+PowerShell's execution policy blocks running a locally saved `setup.ps1`. Allow it for the current session only (no permanent policy change):
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\setup.ps1
+```
+
+or run `powershell -ExecutionPolicy Bypass -File .\setup.ps1`. The `irm … | iex` one-liner is not affected by execution policy.
+
+### Windows: path-too-long errors during a scan
+
+Deeply nested `node_modules` trees in scanned extensions can exceed Windows' legacy 260-character path limit. Enable long paths once (requires admin), then reboot:
+
+```powershell
+Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1
+```
+
+### Windows: where is the Claude Desktop config?
+
+On Windows, Claude Desktop reads `%APPDATA%\Claude\claude_desktop_config.json` (typically `C:\Users\<you>\AppData\Roaming\Claude\claude_desktop_config.json`). `setup.ps1` merges the `tomofound` entry into that file, preserving any other MCP servers you have registered. Open it quickly with:
+
+```powershell
+notepad $env:APPDATA\Claude\claude_desktop_config.json
+```
 
 ### Uninstall
 
@@ -143,10 +214,15 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 rm -rf ~/.tomofound
 ```
 
+```powershell
+# Windows
+Remove-Item -Recurse -Force $HOME\.tomofound
+```
+
 Then:
 
 1. In Claude Desktop App, open **Settings → Customize → Skills** and remove `security-scan`.
-2. Remove the `"tomofound"` key under `mcpServers` in `~/Library/Application Support/Claude/claude_desktop_config.json` (edit by hand — the file holds other Claude preferences too).
+2. Remove the `"tomofound"` key under `mcpServers` in `~/Library/Application Support/Claude/claude_desktop_config.json` (Windows: `%APPDATA%\Claude\claude_desktop_config.json`) — edit by hand, the file holds other Claude preferences too.
 
 ## Usage
 
@@ -239,7 +315,7 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | Trivy CLI | `0.72.0` (pinned in `server/trivy_server.py:_TRIVY_PIN`) | [Apache-2.0](https://github.com/aquasecurity/trivy/blob/main/LICENSE) | https://github.com/aquasecurity/trivy | Downloaded on first scan from the pinned release tag, verified against Trivy's published sha256 checksums, then cached at `~/.tomofound/tools/trivy`. **Deliberately pinned, not floating-latest**: Trivy's March 2026 supply-chain incident shipped a malicious release with matching checksums — a floating `releases/latest` install cannot survive that attack. Bumping the pin is an explicit, reviewed change. Trivy's CVE *database* still auto-updates independently of the binary version. |
 | OSV vulnerability API | API v1 (live) | [Apache-2.0](https://github.com/google/osv.dev/blob/master/LICENSE) (engine); upstream advisory licenses for individual entries | https://osv.dev | Queried by the `check_osv` MCP tool as a fallback when Trivy has no dependency manifest. Findings cite the OSV advisory ID. |
 | Agent Threat Rules (ATR) catalog | `v3.5.4` (pinned in `server/atr_catalog.py:ATR_PIN`) | [MIT](https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/v3.5.4/LICENSE) | https://github.com/Agent-Threat-Rule/agent-threat-rules | Source tarball downloaded by the user-initiated `atr_update` MCP tool, then cached at `~/.tomofound/catalogs/atr/` (rules + LICENSE retained per MIT). Never auto-updated; `atr_update` re-verifies the upstream LICENSE is still MIT before trusting a new tarball. We use ATR as a regex pre-filter — findings cite rule IDs (`ATR-YYYY-NNNNN`) and upstream references (OWASP Agentic / MITRE ATLAS / CVE). |
-| host Python 3 | `≥3.9` | [PSF License](https://docs.python.org/3/license.html) | macOS system | Required for the bootstrap venv. Preinstalled on macOS. |
+| host Python 3 | `≥3.9` (macOS) / `≥3.10` (Windows, enforced by `setup.ps1`) | [PSF License](https://docs.python.org/3/license.html) | macOS system / user-installed on Windows | Required for the bootstrap venv. Preinstalled on macOS; on Windows install via `winget install Python.Python.3.12`. |
 | host `git` | any recent | [GPL-2.0](https://git-scm.com/about/free-and-open-source) | macOS system | Required only when scanning a `https://github.com/...` URL via `clone_repo`. Used as a CLI subprocess; we do not link git as a library. |
 | Python stdlib | ships with host Python | [PSF License](https://docs.python.org/3/license.html) | https://docs.python.org/3/library/ | `ast`, `ipaddress`, `socket`, `subprocess`, `tarfile`, `tempfile`, `urllib`, `zipfile`, etc. |
 
@@ -251,7 +327,7 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `https://api.osv.dev/v1/query` | OSV vulnerability lookup (Level-4 fallback when Trivy has no dependency manifest) | The `check_osv` MCP tool |
 | `https://github.com/<owner>/<repo>(.git)` | `git clone --depth 1` for pre-install scan of a GitHub URL | The `clone_repo` MCP tool |
 | `https://<host>/<path>.zip` | Download a `.zip` for pre-install scan | The `extract_zip` MCP tool — **https only**, refuses private / loopback / link-local / cloud-metadata hosts, re-validates every redirect target |
-| `https://raw.githubusercontent.com/rotoyang/tomofound/main/...` | Installer fetches its own source | `setup.sh` only |
+| `https://raw.githubusercontent.com/rotoyang/tomofound/main/...` | Installer fetches its own source | `setup.sh` / `setup.ps1` only (`setup.ps1` skips the download and copies local files when run from a cloned repo) |
 | `https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v3.5.4/LICENSE` | Re-verify ATR upstream license before trusting a catalog refresh | The `atr_update` MCP tool |
 | `https://github.com/Agent-Threat-Rule/agent-threat-rules/archive/refs/tags/v3.5.4.tar.gz` | Download the pinned ATR source tarball | The `atr_update` MCP tool — user-initiated only, never auto-run |
 | `https://api.github.com/repos/Agent-Threat-Rule/agent-threat-rules/releases/latest` | Report whether a newer ATR release exists than our pin (never downloads) | The `catalogs_status` MCP tool — only when called with `check_upstream: true`; local-only by default |
@@ -262,12 +338,14 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 |-------|--------|-------|
 | `server/trivy_server.py` | This repo | The MCP server itself |
 | `server/python_analyzer.py` | This repo | AST + taint static analysis |
+| `server/atr_catalog.py` | This repo | ATR catalog download, pinning, and regex pre-filter |
 | `skills/security-scan/security-scan.md` | This repo | Detection rules loaded as an MCP prompt |
 | `integrations/codex/skills/security-scan/SKILL.md` | This repo | Codex-side wrapper around the same MCP tools |
 | `integrations/gemini/skills/security-scan/SKILL.md` | This repo | Gemini CLI-side wrapper around the same MCP tools |
-| `setup.sh` | This repo | One-shot installer |
+| `setup.sh` | This repo | One-shot installer (macOS) |
+| `setup.ps1` | This repo | One-shot installer (Windows, PowerShell 5.1+) |
 
-No third-party Python wheels are vendored, no binary blobs ship in the repo, and the installer touches only `~/.tomofound/`, `~/Library/Application Support/Claude/claude_desktop_config.json`, (if Codex is selected) `~/.codex/config.toml` + `~/.codex/skills/security-scan/`, and (if Gemini is selected) `~/.gemini/skills/security-scan/`.
+No third-party Python wheels are vendored, no binary blobs ship in the repo, and the installer touches only `~/.tomofound/`, `~/Library/Application Support/Claude/claude_desktop_config.json`, (if Codex is selected) `~/.codex/config.toml` + `~/.codex/skills/security-scan/`, and (if Gemini is selected) `~/.gemini/skills/security-scan/`. On Windows the equivalent set is `%USERPROFILE%\.tomofound\`, `%APPDATA%\Claude\claude_desktop_config.json`, `%USERPROFILE%\.codex\config.toml` + `%USERPROFILE%\.codex\skills\security-scan\`, and `%USERPROFILE%\.gemini\skills\security-scan\`.
 
 ### Attribution
 
