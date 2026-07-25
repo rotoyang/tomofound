@@ -27,4 +27,4 @@ Before opening a PR that adds a new runtime dependency, external binary, fetched
 
 ## Tests track behaviour, not paths
 
-Tests for `server/trivy_server.py` and `server/python_analyzer.py` live under `tests/`. New MCP tools or analyzer rules need matching test coverage in the same PR; refactors that don't change behaviour shouldn't need new tests but must keep the existing 127 passing.
+Tests for `server/trivy_server.py` and `server/python_analyzer.py` live under `tests/`. New MCP tools or analyzer rules need matching test coverage in the same PR; refactors that don't change behaviour shouldn't need new tests but must keep the full suite passing (`python -m pytest tests/`).
