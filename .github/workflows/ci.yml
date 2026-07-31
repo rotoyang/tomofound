@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/windows-support]
   pull_request:
     branches: [main]
 
@@ -14,7 +14,7 @@ jobs:
       # users run tomofound, so its result has to be visible on its own.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
