@@ -109,7 +109,9 @@ Restart Gemini CLI or open a new session. The `security-scan` skill is installed
 4. Registers the `tomofound` MCP server in `~/.codex/config.toml`
 5. Installs the Gemini CLI skill wrapper into `~/.gemini/skills/security-scan/SKILL.md`
 
-On Windows, `setup.ps1` additionally verifies that a real CPython 3.10+ exists (via the `py -3` launcher, then `python` on PATH — the Microsoft Store alias stub is detected and rejected) and points the MCP server entries at that interpreter.
+On Windows, `setup.ps1` additionally verifies that a real CPython 3.10+ exists (via the `py -3` launcher, then `python` on PATH — the Microsoft Store alias stub is detected and rejected) and points the MCP server entries at that interpreter. It resolves your home directory from `%USERPROFILE%` — the same variable Python's `expanduser("~")` prefers — so the installer and the server always agree on where `.tomofound\` lives, including on domain machines whose `%HOMEPATH%` is redirected to a network share.
+
+Before `setup.ps1` first rewrites a config file it did not author, it saves a one-time copy alongside it (`claude_desktop_config.json.tomofound-backup`, `config.toml.tomofound-backup`). Re-running never overwrites that backup, so it always holds your pre-tomofound state. Both config rewrites are atomic (written to a `.tomofound-tmp` file, then moved into place), so an interrupted install can't leave you with a truncated config and no MCP servers at all.
 
 After this, you can forget about installation — just use `/security-scan` in Claude chat, the `security-scan` skill in Codex, or the `security-scan` skill in Gemini CLI.
 
@@ -346,6 +348,8 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `setup.ps1` | This repo | One-shot installer (Windows, PowerShell 5.1+) |
 
 No third-party Python wheels are vendored, no binary blobs ship in the repo, and the installer touches only `~/.tomofound/`, `~/Library/Application Support/Claude/claude_desktop_config.json`, (if Codex is selected) `~/.codex/config.toml` + `~/.codex/skills/security-scan/`, and (if Gemini is selected) `~/.gemini/skills/security-scan/`. On Windows the equivalent set is `%USERPROFILE%\.tomofound\`, `%APPDATA%\Claude\claude_desktop_config.json`, `%USERPROFILE%\.codex\config.toml` + `%USERPROFILE%\.codex\skills\security-scan\`, and `%USERPROFILE%\.gemini\skills\security-scan\`.
+
+`setup.ps1` additionally writes two sibling files next to each config it rewrites: a one-time `<config>.tomofound-backup` holding your pre-tomofound state, and a transient `<config>.tomofound-tmp` that exists only for the moment between writing the new content and moving it into place. Nothing else is created outside the paths listed above.
 
 ### Attribution
 

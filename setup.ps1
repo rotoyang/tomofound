@@ -86,8 +86,23 @@ try {
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch { }
 
+# The progress bar makes Invoke-WebRequest several times slower on Windows
+# PowerShell 5.1; this script downloads five files.
+$ProgressPreference = 'SilentlyContinue'
+
+# Resolve the home directory the SERVER will use, not the one PowerShell
+# prefers. trivy_server.py builds every path from os.path.expanduser("~"),
+# and CPython's ntpath.expanduser reads USERPROFILE first, falling back to
+# HOMEDRIVE+HOMEPATH. PowerShell's $HOME is always HOMEDRIVE+HOMEPATH. Those
+# agree on a stock machine but diverge under Active Directory home-folder
+# redirection, where HOMEPATH points at a network share: the installer would
+# write to H:\.tomofound while the server looked in C:\Users\<name>\.tomofound,
+# leaving it with no venv, no catalogs, and assets sitting outside the read
+# prefixes its own path checks derive from "~".
+$UserHome         = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+
 $BaseUrl          = 'https://raw.githubusercontent.com/rotoyang/tomofound/main'
-$DataRoot         = Join-Path $HOME '.tomofound'
+$DataRoot         = Join-Path $UserHome '.tomofound'
 $ServerDir        = Join-Path $DataRoot 'server'
 $SkillDir         = Join-Path $DataRoot 'skills\security-scan'
 $VenvDir          = Join-Path $DataRoot 'venv'
@@ -95,9 +110,9 @@ $CatalogsDir      = Join-Path $DataRoot 'catalogs'
 $ToolsDir         = Join-Path $DataRoot 'tools'
 $ReportsDir       = Join-Path $DataRoot 'reports'
 $ClaudeConfigPath = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
-$CodexConfigPath  = Join-Path $HOME '.codex\config.toml'
-$CodexSkillDir    = Join-Path $HOME '.codex\skills\security-scan'
-$GeminiSkillDir   = Join-Path $HOME '.gemini\skills\security-scan'
+$CodexConfigPath  = Join-Path $UserHome '.codex\config.toml'
+$CodexSkillDir    = Join-Path $UserHome '.codex\skills\security-scan'
+$GeminiSkillDir   = Join-Path $UserHome '.gemini\skills\security-scan'
 $ServerPath       = Join-Path $ServerDir 'trivy_server.py'
 
 # Every Python module trivy_server.py imports at runtime must be listed here.
@@ -227,6 +242,39 @@ function Find-Python310 {
     }
 
     return $null
+}
+
+function Write-FileAtomic {
+    # Replace a file in one step. WriteAllText truncates in place, so a failure
+    # part-way through (full disk, AV interception, power loss) would leave the
+    # target half-written — and for claude_desktop_config.json that means the
+    # user loses every OTHER MCP server they had registered, not just ours.
+    # Same .tmp-then-replace shape trivy_server._save_scan_state() already uses.
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content
+    )
+    $tmp = "$Path.tomofound-tmp"
+    [System.IO.File]::WriteAllText($tmp, $Content)
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+function Backup-FileOnce {
+    # Keep one pre-tomofound copy of a config file we did not author. Rewriting
+    # it round-trips the whole document through ConvertFrom-Json/ConvertTo-Json,
+    # which is not byte-faithful (non-ASCII is escaped, key order is not
+    # preserved). The result is valid JSON, but the user should still have their
+    # original. Only the first run backs up, so re-running never overwrites it.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $backup = "$Path.tomofound-backup"
+    if (Test-Path -LiteralPath $backup) { return }
+    try {
+        Copy-Item -LiteralPath $Path -Destination $backup -ErrorAction Stop
+        Write-Host "[i] Backed up your existing config to $backup"
+    } catch {
+        Write-Host "[!] Could not back up ${Path}: $($_.Exception.Message)"
+    }
 }
 
 function ConvertTo-TomlString {
@@ -418,7 +466,8 @@ if ($installClaude) {
         }
         $servers | Add-Member -Force -MemberType NoteProperty -Name 'tomofound' -Value $entry
         $json = $config | ConvertTo-Json -Depth 32
-        [System.IO.File]::WriteAllText($ClaudeConfigPath, $json + "`n")
+        Backup-FileOnce -Path $ClaudeConfigPath
+        Write-FileAtomic -Path $ClaudeConfigPath -Content ($json + "`n")
         Write-Host "[OK] MCP server registered in $ClaudeConfigPath"
     }
 }
@@ -456,7 +505,8 @@ if ($installCodex) {
     if ($newText -ceq $text) {
         Write-Host '[i] Codex MCP server already registered (no change)'
     } else {
-        [System.IO.File]::WriteAllText($CodexConfigPath, $newText)
+        Backup-FileOnce -Path $CodexConfigPath
+        Write-FileAtomic -Path $CodexConfigPath -Content $newText
         Write-Host "[OK] Codex MCP server registered in $CodexConfigPath"
     }
 }
