@@ -17,6 +17,13 @@ from server.trivy_server import (
 )
 
 
+def _hp(*parts):
+    """Native-separator path under home — mirrors how os.walk/abspath emit
+    paths on every platform, unlike expanduser("~/a/b") which keeps the
+    literal's forward slashes on Windows."""
+    return os.path.join(os.path.expanduser("~"), *parts)
+
+
 # --- detect_scan_level ---
 
 def test_detect_level1_lock_file():
@@ -392,38 +399,43 @@ def test_read_file_returns_error_for_missing_file(tmp_path):
 
 # --- platform path coverage ---
 
+def _posix(p):
+    """Forward-slash view of a native path, so endswith()/in assertions about
+    directory structure hold on Windows too."""
+    return p.replace(os.sep, "/")
+
 def test_standard_roots_cover_claude_extension_dirs():
     claude = _STANDARD_ROOTS["claude"]
-    assert any(r.endswith("/.claude/plugins/cache") for r in claude)
-    assert any(r.endswith("/.claude/plugins/repos") for r in claude)
-    assert any(r.endswith("/.claude/skills") for r in claude)
-    assert any(r.endswith("/.claude/agents") for r in claude)
-    assert any(r.endswith("/.claude/commands") for r in claude)
-    assert any(r.endswith("/.claude/.mcp.json") for r in claude)
+    assert any(r.endswith("/.claude/plugins/cache") for r in map(_posix, claude))
+    assert any(r.endswith("/.claude/plugins/repos") for r in map(_posix, claude))
+    assert any(r.endswith("/.claude/skills") for r in map(_posix, claude))
+    assert any(r.endswith("/.claude/agents") for r in map(_posix, claude))
+    assert any(r.endswith("/.claude/commands") for r in map(_posix, claude))
+    assert any(r.endswith("/.claude/.mcp.json") for r in map(_posix, claude))
 
 
 def test_standard_roots_cover_gemini_extension_dirs():
     gemini = _STANDARD_ROOTS["gemini"]
-    assert any(r.endswith("/.gemini/extensions") for r in gemini)
-    assert any(r.endswith("/.gemini/config/plugins") for r in gemini)
-    assert any(r.endswith("/.gemini/commands") for r in gemini)
-    assert any(r.endswith("/.gemini/settings.json") for r in gemini)
+    assert any(r.endswith("/.gemini/extensions") for r in map(_posix, gemini))
+    assert any(r.endswith("/.gemini/config/plugins") for r in map(_posix, gemini))
+    assert any(r.endswith("/.gemini/commands") for r in map(_posix, gemini))
+    assert any(r.endswith("/.gemini/settings.json") for r in map(_posix, gemini))
 
 
 def test_standard_roots_openai_points_at_codex():
     openai = _STANDARD_ROOTS["openai"]
-    assert all("/.codex/" in r or r.endswith("/.codex/AGENTS.md") for r in openai)
-    assert not any("/.openai/" in r for r in openai)
-    assert any(r.endswith("/.codex/auth.json") for r in openai)
-    assert any(r.endswith("/.codex/config.toml") for r in openai)
-    assert any(r.endswith("/.codex/skills") for r in openai)
-    assert any(r.endswith("/.codex/plugins/cache") for r in openai)
-    assert any(r.endswith("/.codex/prompts") for r in openai)
+    assert all("/.codex/" in r or r.endswith("/.codex/AGENTS.md") for r in map(_posix, openai))
+    assert not any("/.openai/" in r for r in map(_posix, openai))
+    assert any(r.endswith("/.codex/auth.json") for r in map(_posix, openai))
+    assert any(r.endswith("/.codex/config.toml") for r in map(_posix, openai))
+    assert any(r.endswith("/.codex/skills") for r in map(_posix, openai))
+    assert any(r.endswith("/.codex/plugins/cache") for r in map(_posix, openai))
+    assert any(r.endswith("/.codex/prompts") for r in map(_posix, openai))
 
 
 def test_read_allowed_prefixes_match_standard_roots():
-    assert any(p.endswith("/.codex/") for p in _READ_ALLOWED_PREFIXES)
-    assert not any(p.endswith("/.openai/") for p in _READ_ALLOWED_PREFIXES)
+    assert any(p.endswith("/.codex/") for p in map(_posix, _READ_ALLOWED_PREFIXES))
+    assert not any(p.endswith("/.openai/") for p in map(_posix, _READ_ALLOWED_PREFIXES))
 
 
 def test_tag_file_treats_agents_md_as_skill(tmp_path):
@@ -433,57 +445,57 @@ def test_tag_file_treats_agents_md_as_skill(tmp_path):
 
 
 def test_tag_file_treats_claude_agents_dir_as_skill():
-    p = os.path.expanduser("~/.claude/agents/my-agent.md")
+    p = _hp(".claude", "agents", "my-agent.md")
     assert _tag_file(p) == "SKILL"
 
 
 def test_tag_file_treats_codex_prompts_as_skill():
-    p = os.path.expanduser("~/.codex/prompts/p.md")
+    p = _hp(".codex", "prompts", "p.md")
     assert _tag_file(p) == "SKILL"
 
 
 def test_tag_file_treats_gemini_commands_toml_as_skill():
-    p = os.path.expanduser("~/.gemini/commands/foo.toml")
+    p = _hp(".gemini", "commands", "foo.toml")
     assert _tag_file(p) == "SKILL"
 
 
 def test_tag_file_codex_config_toml_is_config():
-    p = os.path.expanduser("~/.codex/config.toml")
+    p = _hp(".codex", "config.toml")
     assert _tag_file(p) == "CONFIG"
 
 
 def test_source_type_gemini_extension_is_plugin():
-    p = os.path.expanduser("~/.gemini/extensions/foo/server.ts")
+    p = _hp(".gemini", "extensions", "foo", "server.ts")
     assert _source_type(p, "CODE") == "plugin"
 
 
 def test_source_type_gemini_config_plugin_is_plugin():
-    p = os.path.expanduser("~/.gemini/config/plugins/foo/server.ts")
+    p = _hp(".gemini", "config", "plugins", "foo", "server.ts")
     assert _source_type(p, "CODE") == "plugin"
 
 
 def test_source_type_codex_cached_plugin_is_plugin():
-    p = os.path.expanduser("~/.codex/plugins/cache/openai-bundled/browser/1.0.0/server.ts")
+    p = _hp(".codex", "plugins", "cache", "openai-bundled", "browser", "1.0.0", "server.ts")
     assert _source_type(p, "CODE") == "plugin"
 
 
 def test_plugin_from_path_gemini_extension():
-    p = os.path.expanduser("~/.gemini/extensions/foo/server.ts")
+    p = _hp(".gemini", "extensions", "foo", "server.ts")
     assert _plugin_from_path(p) == "foo"
 
 
 def test_plugin_from_path_gemini_config_plugin():
-    p = os.path.expanduser("~/.gemini/config/plugins/foo/skills/bar/SKILL.md")
+    p = _hp(".gemini", "config", "plugins", "foo", "skills", "bar", "SKILL.md")
     assert _plugin_from_path(p) == "foo"
 
 
 def test_plugin_from_path_codex_cached_plugin():
-    p = os.path.expanduser("~/.codex/plugins/cache/openai-bundled/browser/1.0.0/server.ts")
+    p = _hp(".codex", "plugins", "cache", "openai-bundled", "browser", "1.0.0", "server.ts")
     assert _plugin_from_path(p) == "openai-bundled/browser"
 
 
 def test_plugin_from_path_claude_agents_returns_stem():
-    p = os.path.expanduser("~/.claude/agents/reviewer.md")
+    p = _hp(".claude", "agents", "reviewer.md")
     assert _plugin_from_path(p) == "reviewer"
 
 
@@ -506,22 +518,22 @@ def test_is_safe_root_rejects_root_filesystem():
 
 
 def test_is_safe_root_rejects_ssh():
-    assert _is_safe_root(os.path.expanduser("~/.ssh")) is False
+    assert _is_safe_root(_hp(".ssh")) is False
 
 
 def test_is_safe_root_rejects_aws():
-    assert _is_safe_root(os.path.expanduser("~/.aws")) is False
+    assert _is_safe_root(_hp(".aws")) is False
 
 
 def test_is_safe_root_rejects_gnupg_subpath():
-    assert _is_safe_root(os.path.expanduser("~/.gnupg/private-keys-v1.d")) is False
+    assert _is_safe_root(_hp(".gnupg", "private-keys-v1.d")) is False
 
 
 # --- read_file with sensitive root ---
 
 def test_read_file_rejects_sensitive_root_even_under_home():
-    result = read_file(os.path.expanduser("~/.ssh/id_rsa"),
-                       root=os.path.expanduser("~/.ssh"))
+    result = read_file(_hp(".ssh", "id_rsa"),
+                       root=_hp(".ssh"))
     assert "error" in result
     assert "not permitted" in result["error"]
 
@@ -1244,9 +1256,9 @@ def _fake_home(monkeypatch, tmp_path):
     # Re-derive paths that were computed at module-load time from $HOME.
     monkeypatch.setattr(
         "server.trivy_server._READ_ALLOWED_PREFIXES",
-        [os.path.join(home, ".claude") + "/",
-         os.path.join(home, ".gemini") + "/",
-         os.path.join(home, ".codex") + "/"],
+        [os.path.join(home, ".claude") + os.sep,
+         os.path.join(home, ".gemini") + os.sep,
+         os.path.join(home, ".codex") + os.sep],
     )
     catalog_root = os.path.join(home, ".tomofound", "catalogs", "atr")
     monkeypatch.setattr(_atr_catalog, "CATALOG_ROOT", catalog_root)
@@ -1298,7 +1310,7 @@ def test_atr_scan_path_only_returns_files_with_findings(tmp_path, monkeypatch):
     assert r["files_scanned"] == 3
     assert r["files_with_findings"] == 1
     assert len(r["findings"]) == 1
-    assert r["findings"][0]["file"].endswith("/hit.md")
+    assert r["findings"][0]["file"].endswith(os.sep + "hit.md")
 
 
 def test_atr_scan_path_respects_extension_filter(tmp_path, monkeypatch):
@@ -1508,7 +1520,7 @@ def test_atr_match_dispatch_uses_to_thread_and_deadline():
     # The dispatcher lives at module top-level inside the `if Server:`
     # guard, so we inspect the source file directly rather than relying
     # on a callable. We avoid running a real MCP server in tests.
-    with open(ts.__file__, "r") as f:
+    with open(ts.__file__, "r", encoding="utf-8") as f:
         src = f.read()
     atr_match_block = src.split('if name == "atr_match":', 1)
     assert len(atr_match_block) == 2, "atr_match dispatch branch not found"
@@ -1599,7 +1611,7 @@ def test_generate_report_md_contains_finding():
         "recommendations": ["Remove eval()"],
     })
     md_path = result["files"][0]["path"]
-    with open(md_path) as f:
+    with open(md_path, encoding="utf-8") as f:
         content = f.read()
     assert "Test Report" in content
     assert "BACKDOOR" in content
@@ -1716,7 +1728,7 @@ def test_generate_report_md_includes_skipped_section():
     result = generate_report(scan_id="rpt-skip", formats=["md"])
     assert result.get("total_skipped") == 2
     md_path = result["files"][0]["path"]
-    with open(md_path) as f:
+    with open(md_path, encoding="utf-8") as f:
         content = f.read()
     assert "Incomplete Scans" in content
     assert "plugin-timeout" in content
@@ -1730,7 +1742,7 @@ def test_generate_report_json_includes_skipped():
     ])
     result = generate_report(scan_id="rpt-skip-j", formats=["json"])
     json_path = result["files"][0]["path"]
-    with open(json_path) as f:
+    with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
     assert len(data["skipped"]) == 1
     assert data["skipped"][0]["target"] == "x"
@@ -1743,7 +1755,7 @@ def test_generate_report_no_skipped_section_when_empty():
     ])
     result = generate_report(scan_id="rpt-noskip", formats=["md"])
     md_path = result["files"][0]["path"]
-    with open(md_path) as f:
+    with open(md_path, encoding="utf-8") as f:
         content = f.read()
     assert "Incomplete Scans" not in content
     assert "total_skipped" not in result
@@ -1784,7 +1796,7 @@ def test_blocking_tool_dispatch_uses_to_thread(tool_name, next_branch_marker):
     4 minutes."""
     import server.trivy_server as ts
 
-    with open(ts.__file__, "r") as f:
+    with open(ts.__file__, "r", encoding="utf-8") as f:
         src = f.read()
     parts = src.split(f'if name == "{tool_name}":', 1)
     assert len(parts) == 2, f"{tool_name} dispatch branch not found"
@@ -1934,7 +1946,7 @@ def test_scan_state_persists_across_calls(tmp_path, monkeypatch):
 def test_atr_update_invalidates_scan_state(tmp_path, monkeypatch):
     """Verify via source that atr_update dispatch clears SCAN_STATE_PATH."""
     import server.trivy_server as ts
-    with open(ts.__file__, "r") as f:
+    with open(ts.__file__, "r", encoding="utf-8") as f:
         src = f.read()
     parts = src.split('if name == "atr_update":', 1)
     assert len(parts) == 2

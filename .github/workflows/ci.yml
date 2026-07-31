@@ -8,9 +8,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      # One platform's failure shouldn't hide another's — macOS is where most
+      # users run tomofound, so its result has to be visible on its own.
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
@@ -21,8 +25,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: pip install mcp PyYAML pytest pytest-asyncio
+      # Runtime deps come from _PIP_DEPS in server/trivy_server.py so CI tests the
+      # same pinned SDK a real install gets. Never install them unpinned here.
+      - name: Install runtime dependencies (pinned, matching real installs)
+        run: python .github/scripts/install_pinned_deps.py
+
+      - name: Install test-only dependencies
+        run: pip install pytest pytest-asyncio
+
+      # Catches SDK breakage that import-guards miss: mcp 2.0.0 dropped the
+      # low-level Server decorators, which raises AttributeError at import —
+      # not the ImportError that trivy_server.py falls back on.
+      - name: Verify the MCP server initialises under the pinned SDK
+        run: python -c "import sys; sys.path.insert(0, 'server'); import trivy_server as ts; assert ts.Server is not None and hasattr(ts, '_server'), 'MCP server failed to initialise under the installed SDK'"
 
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short
