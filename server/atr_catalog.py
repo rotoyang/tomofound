@@ -60,7 +60,7 @@ ATTRIBUTION = (
 )
 
 # --- Version pin ------------------------------------------------------------
-ATR_PIN = "v3.5.4"
+ATR_PIN = "v3.5.11"
 ATR_SOURCE_URL = (
     "https://github.com/Agent-Threat-Rule/agent-threat-rules"
     f"/archive/refs/tags/{ATR_PIN}.tar.gz"
@@ -71,9 +71,9 @@ ATR_LICENSE_PROBE_URL = (
 )
 
 # Defensive limits for the tarball fetch.
-_TARBALL_MAX_BYTES = 60 * 1024 * 1024  # 60 MB — current v3.5.4 is ~25 MB
-_EXTRACT_MAX_BYTES = 100 * 1024 * 1024  # 100 MB — rules subtree is ~7 MB
-_EXTRACT_MAX_ENTRIES = 5000             # current rules: 672 files
+_TARBALL_MAX_BYTES = 60 * 1024 * 1024  # 60 MB — current v3.5.11 is ~28 MB
+_EXTRACT_MAX_BYTES = 100 * 1024 * 1024  # 100 MB — rules subtree is ~8 MB
+_EXTRACT_MAX_ENTRIES = 5000             # current rules: 768 files
 
 # Severity mapping from ATR's vocab to ours.
 _SEVERITY = {
