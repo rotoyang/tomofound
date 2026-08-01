@@ -684,7 +684,44 @@ def test_render_prompt_substitutes_args():
 
 
 def test_prompt_name_constant():
+    # MCP prompt namespace — surfaces as /tomofound__security_scan. Distinct
+    # from the skill name below; do not "unify" them.
     assert _PROMPT_NAME == "security_scan"
+
+
+@pytest.mark.parametrize("skill_path", [
+    "skills/security-scan/security-scan.md",
+    "integrations/codex/skills/security-scan/SKILL.md",
+    "integrations/gemini/skills/security-scan/SKILL.md",
+])
+def test_skill_frontmatter_name_matches_its_directory(skill_path):
+    """A skill whose declared name differs from its directory breaks on any
+    host that resolves by the other one.
+
+    This shipped broken: the Claude skill lived in `security-scan/` but
+    declared `security_scan`. Hosts keying on the directory found it, hosts
+    keying on the frontmatter reported "unknown skill: security_scan" for the
+    same `/security-scan` the README documents 30 times. Asserting the two
+    agree is cheaper than rediscovering which surface resolves which way.
+    """
+    import server.trivy_server as ts
+    root = os.path.dirname(os.path.dirname(os.path.abspath(ts.__file__)))
+    full = os.path.join(root, *skill_path.split("/"))
+    with open(full, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    assert text.startswith("---"), f"{skill_path} has no frontmatter"
+    frontmatter = text.split("---", 2)[1]
+    declared = None
+    for line in frontmatter.splitlines():
+        if line.startswith("name:"):
+            declared = line.split(":", 1)[1].strip()
+            break
+
+    directory = os.path.basename(os.path.dirname(full))
+    assert declared == directory, (
+        f"{skill_path}: frontmatter name {declared!r} != directory {directory!r}"
+    )
 
 
 # --- extract_zip ---

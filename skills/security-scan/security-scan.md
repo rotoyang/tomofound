@@ -1,11 +1,12 @@
 ---
-name: security_scan
+name: security-scan
 description: >
   Scan installed AI tool plugins, skills, and connectors for security risks.
   Covers Claude Code, Gemini, and Codex extensions. Detects secrets, backdoors,
   data exfiltration, supply-chain vulnerabilities, and prompt injection in skill files.
   Uses Trivy (auto-installed if missing) for CVE/secret scanning plus LLM semantic analysis.
-  Usage: /tomofound__security_scan [path|url|--target claude|gemini|openai]
+  Usage: /security-scan [path|url|--target claude|gemini|openai] — or
+  /tomofound__security_scan for the same checklist via the MCP prompt.
 ---
 
 You are a security auditor for AI tool extensions. When this prompt is invoked, follow
