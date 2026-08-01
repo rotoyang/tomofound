@@ -83,6 +83,39 @@ _TARBALL_MAX_BYTES = 60 * 1024 * 1024  # 60 MB — current v3.5.11 is ~28 MB
 _EXTRACT_MAX_BYTES = 100 * 1024 * 1024  # 100 MB — rules subtree is ~8 MB
 _EXTRACT_MAX_ENTRIES = 5000             # current rules: 768 files
 
+# ATR condition `field` values we can meaningfully match against a file on
+# disk. ATR rules target an agent's whole runtime, so their conditions name
+# where a string appears in that runtime; we only ever hold a file body, and
+# matching a runtime-shaped field against file text is a category error that
+# manufactures noise.
+#
+# Included, because the text genuinely lives in the file we are reading:
+#   content          — the file body; the original v1 field.
+#   user_input       — for the artefacts we scan (skills, prompts, agent
+#                      instructions) the body IS what gets fed to the model as
+#                      instructions. Direct prompt injection, jailbreaks and
+#                      system-prompt overrides are all keyed here, and skipping
+#                      them left our headline category largely uncovered.
+#   tool_description — MCP tool/prompt descriptions sit in .mcp.json and in
+#                      server definitions we read directly. MCP tool poisoning
+#                      is a core tomofound use case and every upstream rule for
+#                      it keys on this field, so all of them used to be dropped.
+#   tool_name        — same location, same reasoning.
+#
+# Excluded, because they only exist while an agent is running and we would be
+# pattern-matching them against unrelated file text:
+#   tool_response, tool_args, agent_output
+#
+# Measured on a 38-rule sample of v3.5.11: the content-only filter dropped 23
+# rules (61%) entirely, including all three tool_description poisoning rules
+# and ATR-2026-00001 direct prompt injection.
+_FILE_SCANNABLE_FIELDS = frozenset({
+    "content",
+    "user_input",
+    "tool_description",
+    "tool_name",
+})
+
 # Severity mapping from ATR's vocab to ours.
 _SEVERITY = {
     "critical": "critical",
@@ -373,9 +406,7 @@ def _build_rule_entry(raw: dict, path: str) -> dict | None:
             continue
         if c.get("operator") != "regex":
             continue
-        if c.get("field") != "content":
-            # v1: we only know how to match against the file/skill body.
-            # Other ATR fields (mcp_exchange, agent_state, ...) are skipped.
+        if c.get("field") not in _FILE_SCANNABLE_FIELDS:
             continue
         value = c.get("value")
         if not isinstance(value, str) or not value:
@@ -386,6 +417,7 @@ def _build_rule_entry(raw: dict, path: str) -> dict | None:
         except re.error:
             continue
         patterns.append({
+            "field": c.get("field"),
             "pattern": value,
             "description": str(c.get("description") or "").strip(),
         })
@@ -676,6 +708,11 @@ def _match_against_catalog(
                     "rule_id": rule["id"],
                     "rule_category": rule["category"],
                     "rule_maturity": rule["maturity"],
+                    # Which ATR condition field this pattern came from. A hit on
+                    # user_input or tool_description is a weaker signal against a
+                    # static file than one on content, so surface it rather than
+                    # flattening every match into "ATR said so".
+                    "matched_field": pat.get("field") or "content",
                     "rule_url": f"https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/{ATR_PIN}/rules/{rule['category']}/",
                     "references": rule["references"],
                 },

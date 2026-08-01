@@ -10,6 +10,8 @@ import tarfile
 import textwrap
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 import atr_catalog
 
@@ -194,6 +196,71 @@ def test_parse_rules_handles_malformed_yaml(tmp_path):
     catalog = atr_catalog._parse_rules_dir(str(tmp_path / "rules"))
     assert catalog["compiled_rules"] == 0
     assert catalog["skipped_rules"]
+
+
+def _rule_with_field(field, rule_id="ATR-2026-99900"):
+    return {
+        "id": rule_id, "title": "T", "severity": "high",
+        "detection": {"conditions": [
+            {"field": field, "operator": "regex", "value": "needle"},
+        ]},
+    }
+
+
+@pytest.mark.parametrize("field", ["content", "user_input", "tool_description", "tool_name"])
+def test_file_scannable_fields_are_parsed(field):
+    """These four name text that genuinely lives in a file we read.
+
+    user_input matters most: for a skill or prompt file the body IS what gets
+    fed to the model as instructions, and direct prompt injection, jailbreaks
+    and system-prompt overrides are all keyed there. tool_description and
+    tool_name sit in .mcp.json — every upstream MCP tool-poisoning rule keys on
+    them, so a content-only filter dropped tomofound's headline category whole.
+    """
+    entry = atr_catalog._build_rule_entry(
+        _rule_with_field(field), "rules/prompt-injection/x.yaml")
+    assert entry is not None, f"{field} should be scannable against a file body"
+    assert entry["patterns"][0]["field"] == field
+
+
+@pytest.mark.parametrize("field", ["tool_response", "tool_args", "agent_output"])
+def test_runtime_only_fields_are_skipped(field):
+    """These exist only while an agent is running.
+
+    Matching them against static file text is a category error that would
+    manufacture noise, so a rule keyed solely on one of them yields no usable
+    pattern and is dropped.
+    """
+    entry = atr_catalog._build_rule_entry(
+        _rule_with_field(field), "rules/prompt-injection/x.yaml")
+    assert entry is None
+
+
+def test_mixed_rule_keeps_only_the_file_scannable_conditions():
+    entry = atr_catalog._build_rule_entry({
+        "id": "ATR-2026-99901", "title": "T", "severity": "high",
+        "detection": {"conditions": [
+            {"field": "content", "operator": "regex", "value": "a"},
+            {"field": "tool_response", "operator": "regex", "value": "b"},
+            {"field": "user_input", "operator": "regex", "value": "c"},
+        ]},
+    }, "rules/prompt-injection/x.yaml")
+    assert [p["field"] for p in entry["patterns"]] == ["content", "user_input"]
+
+
+def test_finding_provenance_reports_which_field_matched(tmp_path, monkeypatch):
+    """A hit on user_input against a static file is weaker evidence than one on
+    content — the report needs to be able to say which it was."""
+    catalog_root = _isolate_catalog_dir(tmp_path, monkeypatch)
+    os.makedirs(catalog_root)
+    _write_catalog(catalog_root, rules=[{
+        "id": "ATR-2026-99902", "title": "T", "severity": "high",
+        "maturity": "stable", "category": "prompt-injection",
+        "patterns": [{"field": "user_input", "pattern": "needle", "description": "d"}],
+        "references": {"owasp_agentic": [], "mitre_atlas": [], "owasp_llm": [], "cve": []},
+    }])
+    r = atr_catalog.match_content("a needle here")
+    assert r["findings"][0]["provenance"]["matched_field"] == "user_input"
 
 
 def test_severity_mapping_to_canonical():
