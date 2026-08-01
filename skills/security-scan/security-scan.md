@@ -131,11 +131,27 @@ third-party package names, then for each package:
 Call MCP tool: check_osv
   package: "<package name>"
   ecosystem: "<npm|PyPI|Go|crates.io>"
+  version: "<exact version, if you can determine one>"   ← pass it whenever you can
 ```
 
-The tool returns `{ cve_count, vulns: [{ id, severity, summary }] }`.
-Report any package with `cve_count > 0` as `[SUPPLY_CHAIN]` severity `medium`:
-"Version unknown — package has N known CVEs across all versions."
+**Pass `version` whenever the target tells you one** — a pinned requirement
+(`mcp==1.28.1`), a lockfile entry, a documented pin in the README, or an
+installed dist. OSV then returns only advisories whose affected-ranges cover
+that version. Without it you get every advisory ever filed against the
+package, which reads as alarming and is usually unactionable: a correctly
+pinned, unaffected dependency looks like a dozen open CVEs.
+
+The tool returns `{ cve_count, vulns: [...], version_checked, scope }`.
+Report against what was actually checked — never imply more than `scope` says:
+
+- `version_checked` set, `cve_count > 0` → `[SUPPLY_CHAIN]`, severity from the
+  advisories: "N advisories affect `<pkg>` `<version>`" — a real, actionable finding.
+- `version_checked` set, `cve_count == 0` → **not a finding.** Say so in the
+  report body if the package is notable, but do not score it.
+- `version_checked` null, `cve_count > 0` → `[SUPPLY_CHAIN]` severity `low`,
+  worded as unresolved rather than confirmed: "version could not be determined;
+  `<pkg>` has N advisories across all versions — confirm which version is
+  installed before treating this as exposure."
 
 If `skipped_reason` is `"trivy_unavailable"`, note "Trivy unavailable — CVE scan skipped" in the
 report header and continue with LLM-only analysis.
