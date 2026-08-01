@@ -263,6 +263,41 @@ def test_finding_provenance_reports_which_field_matched(tmp_path, monkeypatch):
     assert r["findings"][0]["provenance"]["matched_field"] == "user_input"
 
 
+def _write_meta(catalog_root, version):
+    os.makedirs(catalog_root, exist_ok=True)
+    with open(os.path.join(catalog_root, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump({"version": version, "rules_compiled": 244, "categories": [],
+                   "license": "MIT", "attribution": "x"}, f)
+
+
+def test_catalog_status_flags_a_cache_older_than_the_pin(tmp_path, monkeypatch):
+    """A stale cache used to report a clean `available: true` and nothing else.
+
+    The catalog is only ever refreshed by an explicit, user-initiated
+    atr_update, so a cache can sit years behind the pin while every report
+    header says the source is fine. That means scanning with rules we never
+    pinned and never licence-verified at that tag — the whole point of pinning.
+    """
+    catalog_root = _isolate_catalog_dir(tmp_path, monkeypatch)
+    _write_meta(catalog_root, "v3.5.0")
+
+    status = atr_catalog.catalog_status()
+    assert status["available"] is True
+    assert status["stale"] is True
+    assert status["version"] == "v3.5.0"
+    assert status["pinned_version"] == atr_catalog.ATR_PIN
+    assert "atr_update" in status["reason"]
+
+
+def test_catalog_status_is_not_stale_when_cache_matches_the_pin(tmp_path, monkeypatch):
+    catalog_root = _isolate_catalog_dir(tmp_path, monkeypatch)
+    _write_meta(catalog_root, atr_catalog.ATR_PIN)
+
+    status = atr_catalog.catalog_status()
+    assert status["available"] is True
+    assert "stale" not in status
+
+
 def test_severity_mapping_to_canonical():
     catalog = atr_catalog._build_rule_entry({
         "id": "X", "title": "X", "severity": "informational",

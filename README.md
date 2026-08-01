@@ -64,6 +64,8 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 4. Quit Claude fully (**Cmd-Q**) and reopen it.
 5. Verify: type `/` in any **chat** — `/security-scan` should appear in the slash menu.
 
+> Claude Desktop copies the file when you add it, so this registration is a **snapshot**. Upgrading tomofound later refreshes the file on disk but not Claude's copy — you'll need to re-add it. See [Updating](#2-updating-the-skill-inside-claude-desktop-manual).
+
 ### Step 2 (Codex) — Restart Codex
 
 Restart Codex or open a new thread. The `security-scan` skill should be available and the `tomofound` MCP tools should load.
@@ -84,11 +86,56 @@ After this, you can forget about installation — just use `/security-scan` in C
 
 ### Updating
 
+Three things update on **different schedules**, and the installer only handles the first. Skipping the other two is the most common reason a scan silently runs old code or old rules.
+
+| What | How it updates | Automatic? |
+|---|---|---|
+| tomofound itself (server, prompt source, MCP registration) | re-run the installer | yes, on re-run |
+| The skill **registered inside Claude Desktop** | re-add it by hand — see below | **no** |
+| The ATR rule catalog | `atr_update` from your assistant | **no, never** |
+
+#### 1. tomofound itself
+
 Re-run the same `curl | bash` command. Installation is **idempotent** — re-running is always safe. At the start the installer prints a summary of what it found at `~/.tomofound/` and what it will touch:
 
-- **Refreshed:** server Python modules, the security-scan prompt, the MCP-server registration in Claude / Codex configs.
+- **Refreshed:** server Python modules, the security-scan prompt **at `~/.tomofound/skills/`**, the MCP-server registration in Claude / Codex configs.
 - **Preserved:** the venv (its `_DEPS_VERSION` marker auto-refreshes deps on the next server start if anything changed), cached ATR catalogs, the Trivy binary, and your historical scan reports under `~/.tomofound/reports/`.
 - **Reported as orphans:** any `*.py` in `~/.tomofound/server/` that this version no longer ships. The installer doesn't delete them — you decide.
+
+#### 2. Updating the skill inside Claude Desktop (manual)
+
+When you drag `security-scan.md` into **Settings → Customize → Skills**, Claude Desktop takes **its own copy**. The installer cannot reach that copy, so refreshing `~/.tomofound/skills/` changes nothing about what Claude actually runs. Your registered skill keeps working — at whatever version you first added.
+
+To pick up a new version:
+
+1. Re-run the installer (step 1) so `~/.tomofound/skills/security-scan/security-scan.md` is current.
+2. Open **Settings → Customize → Skills**, remove the existing `security-scan` entry, and drag the refreshed file back in.
+3. Quit Claude fully (**Cmd-Q**) and reopen it.
+
+Codex and Gemini CLI read their skill files from disk each session, so for those the installer alone is enough — restart the client and you're current.
+
+If you only need the checklist and not the slash command, `/tomofound__security_scan` comes from the MCP server directly and is always at the installed version, no re-registration involved.
+
+#### 3. Updating the ATR rule catalog (manual, on purpose)
+
+The catalog is **never** fetched automatically. It is the one part of tomofound that reaches the network on your behalf during normal use, so it only moves when you ask:
+
+```
+Call the atr_update MCP tool          (or just ask: "run atr_update")
+```
+
+Ask your assistant to run it, or invoke the tool directly. It downloads the pinned ATR release, re-verifies the upstream LICENSE is still MIT before trusting the tarball, and re-parses every rule into `~/.tomofound/catalogs/atr/`.
+
+**Re-running the installer does not do this.** Upgrading tomofound changes which ATR version is *pinned*; it does not touch the catalog already on disk. Until you run `atr_update`, scans keep matching the rules you downloaded last time — potentially many releases and hundreds of rules behind.
+
+The report header calls this out rather than showing a green tick for a stale catalog:
+
+```
+⚠️ Agent Threat Rules (ATR) v3.5.0 (244 rules) — STALE: this build pins
+   v3.5.11; run atr_update before trusting these results
+```
+
+Check the current state any time with the `atr_status` tool, or `catalogs_status` for ATR, OSV and Trivy together. Trivy is flagged the same way if the binary on your machine is off the pinned version — it is reused as-is once installed, including a `brew install trivy` of your own.
 
 If you want a genuinely fresh install (e.g. clearing reports), use `--clean`:
 
@@ -127,8 +174,21 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 ### "No findings" but expected results
 
 - Check the ATR catalog is installed by invoking the `atr_status` tool — if the catalog is missing, run `atr_update` first.
+- **Check it isn't stale.** `atr_status` reports the cached version; if it differs from the pinned one the header shows `STALE` and the scan is matching whatever you downloaded last time. Run `atr_update`. See [Updating](#3-updating-the-atr-rule-catalog-manual-on-purpose).
 - Verify the target path exists and contains scannable files by running the `discover_targets` tool.
 - Ensure extensions are installed in their standard locations (`~/.claude/`, `~/.codex/`, `~/.gemini/`).
+
+### I upgraded tomofound but nothing changed
+
+Three things update separately — see [Updating](#updating). In order of how often it catches people:
+
+- **The skill in Claude Desktop keeps its own copy.** Re-running the installer refreshes `~/.tomofound/skills/` but not what Claude runs. Remove and re-add the skill under **Settings → Customize → Skills**, then Cmd-Q and reopen. Codex and Gemini CLI don't have this problem — they read from disk each session.
+- **The ATR catalog never auto-updates.** A new tomofound version changes which ATR release is *pinned*; the rules on disk stay put until you run `atr_update`.
+- **Trivy is reused once installed.** A binary already on `PATH` or in `~/.tomofound/tools/` is used as-is even if this build pins a newer one. The report flags it; delete the binary to let tomofound install the pinned build.
+
+### `/security-scan` says "unknown skill"
+
+The registered skill predates the fix that aligned its declared name with its directory. Re-add it (see above). `/tomofound__security_scan` works meanwhile — that name comes from the MCP server and never changed.
 
 ### setup.sh errors
 
