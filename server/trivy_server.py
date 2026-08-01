@@ -906,6 +906,20 @@ def _trivy_status() -> dict:
             info["db_updated_at"] = m.group(1)
     except Exception as e:
         info["version_probe_error"] = str(e)
+    # _TRIVY_PIN only governs a fresh download: find_or_install_trivy returns
+    # any binary already on PATH or in TOOLS_DIR without inspecting it. That is
+    # deliberate — a user's own `brew install trivy` should be honoured — but
+    # silently scanning with a version we did not pin defeats the reason the
+    # pin exists (see the README's note on Trivy's March 2026 incident). Say so
+    # rather than printing a version nobody compares against the pin.
+    info["pin"] = _TRIVY_PIN
+    running = info.get("binary_version")
+    if running and running != _TRIVY_PIN:
+        info["off_pin"] = True
+        info["reason"] = (
+            f"using Trivy {running} from {trivy_bin}, but this build pins {_TRIVY_PIN} — "
+            f"delete it to let tomofound install the pinned build, or keep yours knowingly"
+        )
     return info
 
 
@@ -1500,14 +1514,19 @@ def atr_scan_path(
     time_budget_seconds: float | None = None,
     max_files: int | None = None,
     incremental: bool = True,
+    root: str | None = None,
 ) -> dict:
     """Server-side batch ATR scan: walk `path`, read each file, match against
     the cached ATR catalog — all inside the server, never sending file content
     back through the LLM. Returns only files that produced findings.
 
-    Path safety: same contract as `read_file`. The target must be under one of
-    `_READ_ALLOWED_PREFIXES` (~/.claude, ~/.gemini, ~/.codex) AND pass
-    `_is_safe_root` (which excludes ~/.ssh, ~/.aws, ...).
+    Path safety: same contract as `read_file`, `root` included. The target must
+    be under one of `_READ_ALLOWED_PREFIXES` (~/.claude, ~/.gemini, ~/.codex)
+    — or under an explicitly-passed `root`, for pre-install scans of a clone or
+    an extracted archive outside those directories — AND pass `_is_safe_root`
+    (which excludes ~/.ssh, ~/.aws, ...). `root` itself is checked by
+    `_is_safe_root` too, so it can widen where we look but never what counts as
+    a safe location.
 
     Budgets: stops early once `time_budget_seconds` of wall time has passed
     (default 30s) OR `max_files` have been processed (default 5,000). When
@@ -1522,6 +1541,17 @@ def atr_scan_path(
     if not _is_safe_root(abs_path):
         return {"error": "path not permitted"}
     allowed = [_ensure_trailing_sep(p) for p in _READ_ALLOWED_PREFIXES]
+    # Same escape hatch read_file already has. Without it this tool could only
+    # ever see installed extensions, so a pre-install scan — the flagship case,
+    # where a GitHub URL is cloned under ~/.tomofound/tools/ — had to fall back
+    # to per-file atr_match. That fallback pulls every file body back through
+    # the LLM, which is exactly what scanning server-side exists to avoid.
+    # `root` is gated by _is_safe_root just like the target, so this widens
+    # where we may look, never what counts as a safe location.
+    if root:
+        if not _is_safe_root(root):
+            return {"error": "root not permitted"}
+        allowed.append(_ensure_trailing_sep(os.path.abspath(os.path.expanduser(root))))
     if not any(abs_path == p.rstrip(os.sep) or abs_path.startswith(p) for p in allowed):
         return {"error": "path not permitted"}
     if not os.path.exists(abs_path):
@@ -1961,6 +1991,10 @@ if Server is not None:
                             "type": "boolean",
                             "description": "Enable hash-based incremental scanning. Files unchanged since the last scan (matching sha256 + catalog version) are skipped. Default true. Pass false to force a full rescan.",
                         },
+                        "root": {
+                            "type": "string",
+                            "description": "Custom scan root, for pre-installation scans outside ~/.claude, ~/.gemini and ~/.codex — pass the `path` returned by clone_repo or extract_zip. Same contract as read_file's `root`: it must itself be under HOME or a system temp dir, and ~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.docker stay blocked. Without this, a cloned repo can only be scanned file-by-file via atr_match, which streams every file body back through the LLM.",
+                        },
                     },
                     "required": ["path"],
                 },
@@ -2261,6 +2295,7 @@ if Server is not None:
                 time_budget_seconds=arguments.get("time_budget_seconds"),
                 max_files=arguments.get("max_files"),
                 incremental=arguments.get("incremental", True),
+                root=arguments.get("root"),
             )
             return [types.TextContent(type="text", text=json.dumps(result))]
 

@@ -488,14 +488,29 @@ def catalog_status() -> dict:
     try:
         with open(META_PATH, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        return {
+        cached_version = meta.get("version")
+        status = {
             "available": True,
-            "version": meta.get("version"),
+            "version": cached_version,
             "rules_compiled": meta.get("rules_compiled"),
             "categories": meta.get("categories"),
             "license": meta.get("license"),
             "attribution": meta.get("attribution"),
         }
+        # The cache is whatever a past atr_update wrote; ATR_PIN is what this
+        # build is supposed to match against. When they disagree the scan is
+        # running rules we never pinned and never licence-verified at that tag,
+        # and — because the catalog is only ever refreshed by an explicit,
+        # user-initiated atr_update — nothing else would ever say so. Reporting
+        # `available: true` and moving on made a years-old cache look healthy.
+        if cached_version and cached_version != ATR_PIN:
+            status["stale"] = True
+            status["pinned_version"] = ATR_PIN
+            status["reason"] = (
+                f"cached catalog is {cached_version} but this build pins {ATR_PIN} — "
+                f"run atr_update to match the pin"
+            )
+        return status
     except Exception as e:
         return {"available": False, "reason": f"catalog meta unreadable: {e}"}
 

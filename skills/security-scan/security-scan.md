@@ -197,6 +197,20 @@ Call MCP tool: atr_scan_path
   extensions: [".md", ".json", ".toml", ".yaml", ".yml"]  ← default; omit unless overriding
 ```
 
+**For a pre-installation scan (GitHub URL, local path, or `.zip`), pass `root`** —
+the clone/extraction lives outside `~/.claude`, `~/.gemini` and `~/.codex`, so
+without it the call is rejected as `path not permitted`:
+
+```
+Call MCP tool: atr_scan_path
+  path: "<the `path` returned by clone_repo / extract_zip>"
+  root: "<the same path>"
+```
+
+Use this rather than falling back to per-file `atr_match`. `atr_match` sends
+every file body back through the LLM, which is exactly what the server-side
+scanner exists to avoid — and on a repo of any size it is far more expensive.
+
 **Do NOT pass the whole ~/.claude tree in one call.** The server has a 30-second
 wall-clock + 5,000-file safety budget per call; whole-home-tree invocations hit
 the budget, return partial results with `budget_exceeded: true`, and waste time
@@ -604,6 +618,16 @@ After all analyses are complete:
 
    - `available: true` → `✅ <name> <version_or_mode_label> (<license> — <attribution>)`
    - `available: false` → `⚠️ <name> — <reason or hint>`
+   - **`stale: true` (ATR) → `⚠️` not `✅`**, and render as
+     `⚠️ <name> <version> (<rules_compiled> rules) — STALE: this build pins <pinned_version>; run atr_update before trusting these results`.
+     A cached catalog can sit many releases behind the pin, and the rule count
+     shown is whatever that old catalog compiled — not what this version would
+     match. Reporting it with a green tick tells the user the source is fine
+     when the scan is running rules this build never pinned. Say it at the top,
+     and say it again in the recommendations.
+   - **`off_pin: true` (Trivy) → `⚠️` not `✅`**, appending `— running <binary_version>, pinned <pin>`.
+     A binary already on PATH or cached from an earlier install is used as-is,
+     so the pin governs fresh downloads only.
 
    For `atr`, include `rules_compiled` if present (e.g. `672 rules`). If the ATR entry carries `upstream.update_available: true`, append a drift note on the ATR line: `— ⬆️ upstream has <upstream_latest> (we pin <pinned>); a newer tomofound release may include it`. For `osv`, label as `live API`. For `trivy`, include `binary_version` and `db_updated_at` if present. The header block goes immediately after the title, before `**Scanned:**`.
 
