@@ -501,10 +501,26 @@ def detect_scan_level(path: str) -> tuple[int, str]:
     return (5, "no scannable content found")
 
 
-def query_osv(package: str, ecosystem: str) -> dict:
+def query_osv(package: str, ecosystem: str, version: str | None = None) -> dict:
+    """Query OSV for advisories against a package, optionally pinned to a version.
+
+    OSV filters to advisories whose affected-ranges actually cover `version`
+    when one is supplied. Without it the answer is every advisory ever filed
+    against the package, across all versions — which reads as alarming and
+    is usually unactionable: `mcp` returns a dozen historical advisories, none
+    of which affect a current release. Pass the version whenever it is known
+    (a lockfile, a pinned requirement, an installed dist) and only omit it when
+    it genuinely isn't.
+
+    `version_checked` tells the caller which question was answered, so a report
+    can say "0 affecting 1.28.1" instead of "12 across all versions".
+    """
     try:
         url = "https://api.osv.dev/v1/query"
-        body = json.dumps({"package": {"name": package, "ecosystem": ecosystem}})
+        query: dict = {"package": {"name": package, "ecosystem": ecosystem}}
+        if version:
+            query["version"] = version
+        body = json.dumps(query)
         req = urllib.request.Request(url, data=body.encode(), headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read())
@@ -516,9 +532,16 @@ def query_osv(package: str, ecosystem: str) -> dict:
                 "severity": vuln.get("database_specific", {}).get("severity", "unknown"),
                 "summary": vuln.get("summary", "")
             })
-        return {"cve_count": len(result_vulns), "vulns": result_vulns}
+        return {
+            "cve_count": len(result_vulns),
+            "vulns": result_vulns,
+            "version_checked": version,
+            "scope": (f"advisories affecting {package} {version}" if version
+                      else f"advisories against {package} across ALL versions — "
+                           f"pass `version` to narrow to the one you have"),
+        }
     except Exception as e:
-        return {"cve_count": 0, "vulns": [], "error": str(e)}
+        return {"cve_count": 0, "vulns": [], "version_checked": version, "error": str(e)}
 
 
 def discover_targets(target: str = None, path: str = None) -> dict:
@@ -1771,7 +1794,7 @@ if Server is not None:
             ),
             types.Tool(
                 name="check_osv",
-                description="Check a package against the OSV vulnerability database.",
+                description="Check a package against the OSV vulnerability database. ALWAYS pass `version` when you know it (from a lockfile, a pinned requirement, or an installed dist) — OSV then returns only advisories whose affected-ranges actually cover that version. Without it you get every advisory ever filed against the package across all versions, which is alarming and usually unactionable. The response echoes `version_checked` and a `scope` string saying which question was answered.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -1779,6 +1802,10 @@ if Server is not None:
                         "ecosystem": {
                             "type": "string",
                             "description": "Ecosystem: npm, PyPI, Go, crates.io",
+                        },
+                        "version": {
+                            "type": "string",
+                            "description": "Exact installed/pinned version, e.g. '1.28.1'. Omit ONLY when the version genuinely cannot be determined (source-only scan with no manifest).",
                         },
                     },
                     "required": ["package", "ecosystem"],
@@ -2169,7 +2196,8 @@ if Server is not None:
         if name == "check_osv":
             # urllib HTTP call — offload to worker thread.
             result = await asyncio.to_thread(
-                query_osv, arguments["package"], arguments["ecosystem"]
+                query_osv, arguments["package"], arguments["ecosystem"],
+                arguments.get("version"),
             )
             return [types.TextContent(type="text", text=json.dumps(result))]
 

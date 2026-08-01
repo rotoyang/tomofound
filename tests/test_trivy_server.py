@@ -301,6 +301,43 @@ def test_query_osv_empty_response():
         assert result["vulns"] == []
 
 
+def _osv_capture():
+    """Patch urlopen and hand back the request body OSV would have received."""
+    sent = {}
+    mock_response = json.dumps({"vulns": []}).encode()
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__ = MagicMock(return_value=MagicMock(read=lambda: mock_response))
+    mock_ctx.__exit__ = MagicMock(return_value=False)
+
+    def fake_urlopen(req, *a, **kw):
+        sent["body"] = json.loads(req.data.decode())
+        return mock_ctx
+
+    return sent, fake_urlopen
+
+
+def test_query_osv_sends_version_so_osv_filters_by_affected_range():
+    """Without a version OSV answers "every advisory ever filed against this
+    package", which is what made a pinned, unaffected dependency look risky in
+    a real report. With one it answers the question actually being asked."""
+    sent, fake = _osv_capture()
+    with patch("urllib.request.urlopen", side_effect=fake):
+        result = query_osv("mcp", "PyPI", "1.28.1")
+    assert sent["body"]["version"] == "1.28.1"
+    assert sent["body"]["package"] == {"name": "mcp", "ecosystem": "PyPI"}
+    assert result["version_checked"] == "1.28.1"
+    assert "1.28.1" in result["scope"]
+
+
+def test_query_osv_without_version_says_the_answer_is_unfiltered():
+    sent, fake = _osv_capture()
+    with patch("urllib.request.urlopen", side_effect=fake):
+        result = query_osv("mcp", "PyPI")
+    assert "version" not in sent["body"]
+    assert result["version_checked"] is None
+    assert "ALL versions" in result["scope"]
+
+
 def test_query_osv_network_error():
     with patch("urllib.request.urlopen", side_effect=Exception("timeout")):
         result = query_osv("axios", "npm")
