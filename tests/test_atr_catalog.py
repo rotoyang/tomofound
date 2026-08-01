@@ -128,6 +128,21 @@ def test_source_url_is_pinned():
     assert atr_catalog.ATR_LICENSE_PROBE_URL.startswith("https://raw.githubusercontent.com/")
 
 
+def test_every_version_bearing_constant_tracks_the_pin():
+    """A bump that misses one of these ships a stale value silently.
+
+    ATTRIBUTION is returned by catalog_status() and rendered in every scan
+    report header, so a stale tag there credits the wrong version of upstream's
+    work — and nothing fails to make anyone notice. LICENSE_URL points at the
+    licence we claim to have verified, which must be the one at the tag we
+    actually fetch. Both are asserted here rather than trusted to review.
+    """
+    pin = atr_catalog.ATR_PIN
+    for name in ("ATR_SOURCE_URL", "ATR_LICENSE_PROBE_URL", "LICENSE_URL", "ATTRIBUTION"):
+        value = getattr(atr_catalog, name)
+        assert pin in value, f"{name} does not carry ATR_PIN ({pin}): {value!r}"
+
+
 # --- Parsing ----------------------------------------------------------------
 
 def test_parse_rules_dir_builds_compiled_catalog(tmp_path):

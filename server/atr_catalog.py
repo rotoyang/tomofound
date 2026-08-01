@@ -19,8 +19,8 @@ lives at the user's machine, fetched from the user's network on the user's
 explicit invocation.
 
 License compliance:
-- Upstream: MIT (verified directly from
-  https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v3.5.4/LICENSE,
+- Upstream: MIT (verified directly from the LICENSE at the pinned tag —
+  see ATR_LICENSE_PROBE_URL, which derives from ATR_PIN,
   standard GitHub MIT template, sha256 stored as _ATR_LICENSE_SHA256_HINT
   for first-run sanity check — not used as a gate, just a hint to flag
   obvious license-replacement supply-chain attacks).
@@ -51,15 +51,12 @@ LICENSE_PATH = os.path.join(CATALOG_ROOT, "LICENSE")
 META_PATH = os.path.join(CATALOG_ROOT, "meta.json")
 PARSED_CATALOG_PATH = os.path.join(CATALOG_ROOT, "catalog.json")
 
-# --- License / attribution constants ---------------------------------------
-LICENSE = "MIT"
-LICENSE_URL = "https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/v3.5.4/LICENSE"
-ATTRIBUTION = (
-    "Agent Threat Rules (ATR) v3.5.4, © 2026 ATR Contributors, MIT License — "
-    "https://github.com/Agent-Threat-Rule/agent-threat-rules"
-)
-
 # --- Version pin ------------------------------------------------------------
+# Declared before the license/attribution constants because they interpolate it.
+# Everything version-bearing below MUST derive from ATR_PIN — a hardcoded tag
+# silently goes stale on the next bump, and attribution is user-visible: it is
+# returned by catalog_status() and rendered in every scan report header, so a
+# stale value credits the wrong version of someone else's work.
 ATR_PIN = "v3.5.11"
 ATR_SOURCE_URL = (
     "https://github.com/Agent-Threat-Rule/agent-threat-rules"
@@ -68,6 +65,17 @@ ATR_SOURCE_URL = (
 ATR_LICENSE_PROBE_URL = (
     "https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules"
     f"/{ATR_PIN}/LICENSE"
+)
+
+# --- License / attribution constants ---------------------------------------
+LICENSE = "MIT"
+LICENSE_URL = (
+    "https://github.com/Agent-Threat-Rule/agent-threat-rules"
+    f"/blob/{ATR_PIN}/LICENSE"
+)
+ATTRIBUTION = (
+    f"Agent Threat Rules (ATR) {ATR_PIN}, © 2026 ATR Contributors, MIT License — "
+    "https://github.com/Agent-Threat-Rule/agent-threat-rules"
 )
 
 # Defensive limits for the tarball fetch.
