@@ -45,6 +45,16 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 
 By default this configures Claude, Codex, and Gemini CLI.
 
+The one-liner fetches `setup.sh` from `main`, but **the installer itself pulls the server and skill from a pinned release tag**, not from the branch. tomofound pins Trivy, the ATR catalog and the mcp SDK for exactly this reason; serving its own source off a moving branch while making that argument about everyone else's would not hold up. A commit merged to `main` does not reach new installs until a release bumps the pin. The installer prints which tag it is using.
+
+To install unreleased code deliberately:
+
+```bash
+TOMOFOUND_REF=main bash -c "$(curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh)"
+```
+
+It says so on the way past. Note this narrows the trusted window rather than closing it — `setup.sh` is still read from `main`, since a `curl | bash` URL has to point somewhere. That file is ~250 lines and is the one piece a wary user can realistically read before piping it to a shell; the ~2,500 lines of server code it installs are now pinned.
+
 ```bash
 # Claude only
 curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | bash -s -- --claude
@@ -323,7 +333,7 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `https://api.osv.dev/v1/query` | OSV vulnerability lookup (Level-4 fallback when Trivy has no dependency manifest) | The `check_osv` MCP tool |
 | `https://github.com/<owner>/<repo>(.git)` | `git clone --depth 1` for pre-install scan of a GitHub URL | The `clone_repo` MCP tool |
 | `https://<host>/<path>.zip` | Download a `.zip` for pre-install scan | The `extract_zip` MCP tool — **https only**, refuses private / loopback / link-local / cloud-metadata hosts, re-validates every redirect target |
-| `https://raw.githubusercontent.com/rotoyang/tomofound/main/...` | Installer fetches its own source | `setup.sh` only |
+| `https://raw.githubusercontent.com/rotoyang/tomofound/<release tag>/...` | Installer fetches the server + skill at the pinned tag (`TOMOFOUND_REF`, default the current release; a missing tag fails loudly rather than falling back to `main`) | `setup.sh` only |
 | `https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v3.5.11/LICENSE` | Re-verify ATR upstream license before trusting a catalog refresh | The `atr_update` MCP tool |
 | `https://github.com/Agent-Threat-Rule/agent-threat-rules/archive/refs/tags/v3.5.11.tar.gz` | Download the pinned ATR source tarball | The `atr_update` MCP tool — user-initiated only, never auto-run |
 | `https://api.github.com/repos/Agent-Threat-Rule/agent-threat-rules/releases/latest` | Report whether a newer ATR release exists than our pin (never downloads) | The `catalogs_status` MCP tool — only when called with `check_upstream: true`; local-only by default |

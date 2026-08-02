@@ -28,3 +28,39 @@ Before opening a PR that adds a new runtime dependency, external binary, fetched
 ## Tests track behaviour, not paths
 
 Tests for `server/trivy_server.py` and `server/python_analyzer.py` live under `tests/`. New MCP tools or analyzer rules need matching test coverage in the same PR; refactors that don't change behaviour shouldn't need new tests but must keep the full suite passing (`python -m pytest tests/`).
+
+## Releases pin the installer, and the order matters
+
+`setup.sh` fetches the server and skill from `TOMOFOUND_REF`, which defaults to a
+release tag rather than `main`. That is deliberate: tomofound pins Trivy, the ATR
+catalog and the mcp SDK, and serving its own source off a moving branch while
+making that argument about everyone else's does not hold up. A commit merged to
+`main` must not reach `curl | bash` installs until a release says so.
+
+Cutting a release, in this order:
+
+1. In the release PR, set `TOMOFOUND_REF` in `setup.sh` to the version being cut.
+2. Merge it.
+3. Tag **that** commit and publish.
+
+Reversing 2 and 3 leaves `main` pointing at a tag that does not exist yet, and
+the documented installer fails for everyone who runs it in that window. The
+failure is loud and explains itself — it does not silently fall back to `main`,
+because that would reintroduce exactly the exposure the pin removes — but it is
+still a broken install command on the front page of the README.
+
+Before publishing, confirm the pinned URLs actually resolve. A tag that exists in
+git is not the same as one `raw.githubusercontent.com` will serve:
+
+```bash
+for f in server/trivy_server.py server/python_analyzer.py server/atr_catalog.py \
+         skills/security-scan/security-scan.md \
+         integrations/codex/skills/security-scan/SKILL.md \
+         integrations/gemini/skills/security-scan/SKILL.md; do
+  curl -sS -o /dev/null -w "%{http_code}  $f\n" \
+    "https://raw.githubusercontent.com/rotoyang/tomofound/<tag>/$f"
+done
+```
+
+All six must return 200. `setup.ps1` carries its own `$BaseUrl` and needs the
+same bump whenever it is in play.
