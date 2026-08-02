@@ -2171,6 +2171,7 @@ def test_download_trivy_archive_stops_at_the_wall_clock_budget(tmp_path):
     class _SlowResp:
         def __init__(self):
             self.reads = 0
+            self.headers = {"Content-Length": "0"}   # unknown size, as a real CDN may report
 
         def read(self, n):
             self.reads += 1
@@ -2222,3 +2223,27 @@ def test_scan_paths_use_the_short_inline_install_budget():
     assert src.count("install_budget_sec=_TRIVY_INLINE_INSTALL_BUDGET_SEC") == 2, \
         "both scan_directory paths must bound an implicit install"
     assert ts._TRIVY_INLINE_INSTALL_BUDGET_SEC < ts._TRIVY_DOWNLOAD_BUDGET_SEC
+
+
+def test_install_tools_cli_is_reachable_without_the_mcp_sdk():
+    """setup.sh invokes `--install-tools` to build the venv and fetch the
+    catalog and Trivy. It must dispatch BEFORE the mcp import block: on a first
+    install the SDK isn't present yet, and gating the installer behind it would
+    make the step a no-op exactly when it is needed."""
+    import server.trivy_server as ts
+    src = open(ts.__file__, "r", encoding="utf-8").read()
+    cli = src.index('if __name__ == "__main__" and "--install-tools" in sys.argv:')
+    mcp_import = src.index("    from mcp.server import Server")
+    assert cli < mcp_import, "--install-tools must dispatch before the mcp import"
+
+
+def test_install_tools_cli_writes_progress_to_stderr_only():
+    """stdout carries MCP's JSON-RPC framing and this module serves it, so a
+    stray print() to stdout would corrupt the protocol for every user."""
+    import server.trivy_server as ts
+    src = open(ts.__file__, "r", encoding="utf-8").read()
+    body = src[src.index("def _install_tools_cli"):src.index("if __name__ == \"__main__\" and")]
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("print(") or " print(" in stripped:
+            assert "file=sys.stderr" in stripped, f"install-tools print without stderr: {stripped}"
