@@ -297,8 +297,22 @@ def _source_type(path: str, tag: str) -> str:
     return "other"
 
 
-_TRIVY_DOWNLOAD_TIMEOUT_SEC = 300  # 5 min — Trivy binary tarball is ~50 MB
-_TRIVY_DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024  # 200 MB hard cap
+# Socket timeout — how long a single read may stall, NOT a bound on total
+# download time. A slow-but-steady connection never trips it.
+_TRIVY_SOCKET_TIMEOUT_SEC = 300
+# Wall-clock bound on the whole download. Needed because the socket timeout
+# above is not one: without this a slow link can hold an MCP tool call open
+# indefinitely, past whatever request timeout the client enforces.
+_TRIVY_DOWNLOAD_BUDGET_SEC = 600
+# Budget when the download happens implicitly inside scan_directory. Kept
+# short deliberately: a scan should not silently turn into a multi-minute
+# install that the client times out anyway. Past this we stop and tell the
+# caller to run install_trivy, which has the full budget.
+_TRIVY_INLINE_INSTALL_BUDGET_SEC = 45
+# ~165 MB extracted on macOS ARM64; the archive is smaller but not by much.
+# The cap is a defence against a malicious redirect into a huge blob, so keep
+# real headroom over the genuine size rather than hugging it.
+_TRIVY_DOWNLOAD_MAX_BYTES = 400 * 1024 * 1024
 
 # Pinned Trivy release. We deliberately do NOT install `releases/latest`:
 # Trivy suffered a supply-chain incident in March 2026 (malicious v0.69.4
@@ -378,14 +392,33 @@ def _fetch_trivy_checksums(version: str) -> dict[str, str]:
     return checksums
 
 
-def _download_trivy_archive(url: str, dest_path: str) -> int:
-    """Stream-download the Trivy archive with an explicit per-call timeout
-    and a hard byte cap (defense against malicious-redirect-into-huge-blob).
-    Returns bytes_written. Raises on any failure."""
+class _TrivyDownloadTimeout(RuntimeError):
+    """Wall-clock budget for the download ran out. Distinct from a transport
+    failure: the download was working, there just wasn't time for it here."""
+
+
+def _download_trivy_archive(url: str, dest_path: str, budget_sec: float | None = None) -> int:
+    """Stream-download the Trivy archive under a socket timeout, a wall-clock
+    budget, and a hard byte cap.
+
+    The byte cap defends against a malicious redirect into a huge blob. The
+    wall-clock budget is separate and equally necessary: `urlopen(timeout=…)`
+    bounds how long one read may stall, not how long the transfer may take, so
+    a slow-but-steady link would otherwise hold an MCP tool call open forever.
+    Returns bytes_written. Raises `_TrivyDownloadTimeout` if the budget runs
+    out, or the underlying error on any other failure."""
+    import time
+
+    deadline = (time.monotonic() + budget_sec) if budget_sec else None
     written = 0
-    with urllib.request.urlopen(url, timeout=_TRIVY_DOWNLOAD_TIMEOUT_SEC) as resp:
+    with urllib.request.urlopen(url, timeout=_TRIVY_SOCKET_TIMEOUT_SEC) as resp:
         with open(dest_path, "wb") as out:
             while True:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise _TrivyDownloadTimeout(
+                        f"download exceeded {budget_sec:.0f}s "
+                        f"({written / 1048576:.0f} MB of ~165 MB fetched)"
+                    )
                 chunk = resp.read(65536)
                 if not chunk:
                     break
@@ -398,7 +431,14 @@ def _download_trivy_archive(url: str, dest_path: str) -> int:
     return written
 
 
-def find_or_install_trivy() -> str | None:
+def find_or_install_trivy(install_budget_sec: float | None = None) -> str | None:
+    """Return a usable Trivy path, downloading the pinned build if needed.
+
+    `install_budget_sec` bounds only a fresh download. scan_directory passes a
+    short one so a scan cannot silently become a multi-minute install that the
+    client times out anyway; install_trivy passes the full budget. Returns None
+    when Trivy is unavailable — callers fall back to LLM-only rather than fail.
+    """
     found = shutil.which("trivy")
     if found:
         return found
@@ -449,7 +489,7 @@ def find_or_install_trivy() -> str | None:
             tmp_path = tmp.name
         binary_name = "trivy" + _EXE
         try:
-            _download_trivy_archive(url, tmp_path)
+            _download_trivy_archive(url, tmp_path, budget_sec=install_budget_sec)
             actual_sha = _hash_file_sha256(tmp_path)
             if actual_sha != expected_sha:
                 return None  # refuse silently — caller falls back to LLM-only
@@ -891,6 +931,41 @@ _TRIVY_VERSION_RE = re.compile(r"^Version:\s*(\S+)", re.M)
 _TRIVY_DB_UPDATED_RE = re.compile(r"UpdatedAt:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9:.]+)")
 
 
+def install_trivy() -> dict:
+    """Download and verify the pinned Trivy build, deliberately.
+
+    scan_directory will auto-install, but only within a short budget: the
+    archive is ~165 MB, and a client that times the request out mid-download
+    leaves the user retrying a full fetch each time with nothing to show. This
+    tool exists so the long download can be done once, on purpose, as its own
+    call — the same code path, the same checksum verification, just without a
+    scan waiting on it.
+    """
+    existing = shutil.which("trivy")
+    if existing:
+        return {"ok": True, "action": "none", "path": existing,
+                "note": "Trivy already on PATH — tomofound uses yours as-is. "
+                        "Delete it first if you want the pinned build instead."}
+    if os.path.exists(TOOLS_TRIVY):
+        return {"ok": True, "action": "none", "path": TOOLS_TRIVY,
+                "note": "already installed — delete it first to re-download"}
+
+    path = find_or_install_trivy(install_budget_sec=_TRIVY_DOWNLOAD_BUDGET_SEC)
+    if not path:
+        return {
+            "ok": False,
+            "action": "failed",
+            "pin": _TRIVY_PIN,
+            "reason": (
+                "download, checksum verification, or extraction failed. Trivy is "
+                "optional — scans continue without CVE/secret coverage. Check "
+                "network access to github.com and retry, or install Trivy "
+                "yourself (e.g. brew install trivy) and tomofound will use it."
+            ),
+        }
+    return {"ok": True, "action": "installed", "path": path, "version": _TRIVY_PIN}
+
+
 def _trivy_status() -> dict:
     """Inspect the locally-installed Trivy binary (if any). Read-only — does
     not auto-install. Never blocks on network."""
@@ -1320,7 +1395,8 @@ def scan_all(
             dirs_skipped += 1
             continue
 
-        trivy = find_or_install_trivy()
+        trivy = find_or_install_trivy(
+            install_budget_sec=_TRIVY_INLINE_INSTALL_BUDGET_SEC)
         level, level_desc = detect_scan_level(path)
 
         if not trivy:
@@ -1975,6 +2051,11 @@ if Server is not None:
                 inputSchema={"type": "object", "properties": {}},
             ),
             types.Tool(
+                name="install_trivy",
+                description="Download and verify the pinned Trivy build as its own call. Use when scan_directory reports skipped_reason 'trivy_unavailable' with an install hint: the archive is ~165 MB, so an implicit install inside a scan is deliberately capped at a short budget and gives up rather than holding the request open past the client's timeout. This tool runs the same code path and the same sha256 verification with the full budget. No-op (and says so) if Trivy is already on PATH or already installed — tomofound honours an install you manage. Returns {ok, action: installed|none|failed, path?, version?, reason?}.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            types.Tool(
                 name="catalogs_status",
                 description="Aggregated freshness status for every catalog / source the scanner consults — ATR (local), OSV (live API), Trivy (managed binary). Returns {catalogs: [{source, name, mode, available, version?, license, attribution, ...}, ...]}. The skill renders this into every scan report's header so the user can see at a glance what catalogs were used, what version, and what license. Local-only by default; pass check_upstream=true to also probe the ATR upstream repo for a newer release than the pin (adds `upstream: {checked, pinned, upstream_latest, update_available}` to the ATR entry — reports drift only, never downloads).",
                 inputSchema={
@@ -2156,12 +2237,16 @@ if Server is not None:
                     return {"trivy_available": False, "results": None,
                             "skipped_reason": "path_not_permitted",
                             "scan_level": None, "scan_level_desc": "path not permitted"}
-                trivy = find_or_install_trivy()
+                trivy = find_or_install_trivy(
+                    install_budget_sec=_TRIVY_INLINE_INSTALL_BUDGET_SEC)
                 level, level_desc = detect_scan_level(path)
 
                 if not trivy:
                     return {"trivy_available": False, "results": None,
                             "skipped_reason": "trivy_unavailable",
+                            "hint": "Trivy is not installed and could not be fetched within "
+                                    "the inline budget (the archive is ~165 MB). Run the "
+                                    "install_trivy tool once, then rescan.",
                             "scan_level": level, "scan_level_desc": level_desc}
 
                 if level == 5:
@@ -2298,6 +2383,12 @@ if Server is not None:
 
         if name == "atr_status":
             result = atr_catalog.catalog_status()
+            return [types.TextContent(type="text", text=json.dumps(result))]
+
+        if name == "install_trivy":
+            # A ~165 MB download plus checksum verification — must not run on
+            # the event loop, or every other tool call blocks behind it.
+            result = await asyncio.to_thread(install_trivy)
             return [types.TextContent(type="text", text=json.dumps(result))]
 
         if name == "catalogs_status":

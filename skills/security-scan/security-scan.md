@@ -153,8 +153,25 @@ Report against what was actually checked — never imply more than `scope` says:
   `<pkg>` has N advisories across all versions — confirm which version is
   installed before treating this as exposure."
 
-If `skipped_reason` is `"trivy_unavailable"`, note "Trivy unavailable — CVE scan skipped" in the
-report header and continue with LLM-only analysis.
+If `skipped_reason` is `"trivy_unavailable"` and the response carries a `hint`
+about installing, Trivy simply isn't downloaded yet. The archive is ~165 MB, so
+an implicit install inside a scan is capped at a short budget on purpose —
+otherwise the client times the request out mid-download and every retry starts
+the fetch from zero. Do the install once, as its own call:
+
+```
+Call MCP tool: install_trivy
+```
+
+It returns `{ok, action: installed|none|failed, path?, reason?}`. On
+`installed`, re-issue the `scan_directory` call that was skipped. On `none`,
+Trivy was already present and the skip had another cause. On `failed`, report
+`reason` and continue — Trivy is optional.
+
+**Do this at most once per scan.** If it fails, don't retry in a loop: note
+"Trivy unavailable — CVE scan skipped" in the report header, say why, and
+continue with the remaining passes. A missing CVE scan degrades coverage; it
+does not invalidate the ATR, AST/taint, or LLM findings.
 
 **Static Python analysis (AST + taint tracking).** For each plugin directory or
 standalone `.py` file in the scan target list, also call:
