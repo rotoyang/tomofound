@@ -2205,14 +2205,41 @@ def test_install_trivy_is_a_noop_when_trivy_is_already_on_path():
     assert r["path"] == "/opt/homebrew/bin/trivy"
 
 
-def test_install_trivy_reports_failure_actionably():
+def test_install_trivy_surfaces_the_actual_failure_reason():
+    """Every failure used to collapse to a bare None, so the installer could
+    only say "download, checksum verification, or extraction failed" — lumping
+    together events that call for opposite responses."""
     import server.trivy_server as ts
     with patch("shutil.which", return_value=None), \
          patch("os.path.exists", return_value=False), \
-         patch.object(ts, "find_or_install_trivy", return_value=None):
+         patch.object(ts, "_resolve_trivy", return_value=(None, "connection reset at 28 MB")):
         r = ts.install_trivy()
     assert r["ok"] is False and r["action"] == "failed"
-    assert "brew install trivy" in r["reason"]
+    assert r["reason"] == "connection reset at 28 MB"
+    assert "brew install trivy" in r["fallback"]
+
+
+def test_checksum_mismatch_does_not_tell_the_user_to_retry():
+    """A mismatch means the bytes we received are not the bytes upstream
+    published. Retrying blindly is exactly the wrong instinct, and this project
+    pins Trivy precisely because of a supply-chain incident."""
+    import server.trivy_server as ts
+    src = open(ts.__file__, "r", encoding="utf-8").read()
+    start = src.index("if actual_sha != expected_sha:")
+    block = src[start:start + 700]
+    assert "SHA-256 MISMATCH" in block
+    assert "Do not retry" in block
+
+
+def test_distinct_failures_produce_distinct_reasons():
+    """Platform, architecture, checksum-fetch and mismatch failures must not
+    all read the same, or the message tells the user nothing."""
+    import server.trivy_server as ts
+    src = open(ts.__file__, "r", encoding="utf-8").read()
+    start = src.index("def _resolve_trivy")
+    end = src.index("\ndef ", start + 1)          # the next top-level def, whatever it is
+    reasons = [ln for ln in src[start:end].splitlines() if "return None," in ln]
+    assert len(reasons) >= 4, f"expected several distinct failure reasons, got {len(reasons)}"
 
 
 def test_scan_paths_use_the_short_inline_install_budget():

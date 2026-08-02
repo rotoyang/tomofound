@@ -447,7 +447,23 @@ def _download_trivy_archive(url: str, dest_path: str, budget_sec: float | None =
 
 
 def find_or_install_trivy(install_budget_sec: float | None = None, progress=None) -> str | None:
-    """Return a usable Trivy path, downloading the pinned build if needed.
+    """Return a usable Trivy path, or None. Reason-free wrapper for callers
+    that only branch on availability; see `_resolve_trivy` for the reason."""
+    path, _ = _resolve_trivy(install_budget_sec=install_budget_sec, progress=progress)
+    return path
+
+
+def _resolve_trivy(install_budget_sec: float | None = None,
+                   progress=None) -> tuple[str | None, str | None]:
+    """Return `(path, reason)`. `reason` is None on success.
+
+    Every failure used to collapse into a bare `return None`, so the installer
+    could only say "download, checksum verification, or extraction failed" —
+    lumping together events that call for opposite responses. A dropped
+    connection means retry; a checksum mismatch means something is wrong and
+    retrying blindly is the last thing you should do. For a tool that pins
+    Trivy *because* of a supply-chain incident, refusing to distinguish those
+    is not acceptable.
 
     `install_budget_sec` bounds only a fresh download. scan_directory passes a
     short one so a scan cannot silently become a multi-minute install that the
@@ -456,10 +472,10 @@ def find_or_install_trivy(install_budget_sec: float | None = None, progress=None
     """
     found = shutil.which("trivy")
     if found:
-        return found
+        return found, None
 
     if os.path.exists(TOOLS_TRIVY):
-        return TOOLS_TRIVY
+        return TOOLS_TRIVY, None
 
     try:
         version = _TRIVY_PIN
@@ -472,18 +488,19 @@ def find_or_install_trivy(install_budget_sec: float | None = None, progress=None
         elif system == "Windows":
             os_name, archive_ext = "windows", ".zip"
         else:
-            return None
+            return None, f"unsupported platform: {system}"
         if system == "Windows":
             # Trivy ships no windows-ARM64 build; require amd64.
             if machine not in ("x86_64", "amd64"):
-                return None
+                return None, ("Trivy publishes no Windows ARM64 build; "
+                              f"this machine reports {machine}")
             arch = "64bit"
         elif machine in ("arm64", "aarch64"):
             arch = "ARM64"
         elif machine in ("x86_64", "amd64"):
             arch = "64bit"
         else:
-            return None
+            return None, f"unsupported architecture: {machine}"
         archive_name = f"trivy_{version}_{os_name}-{arch}{archive_ext}"
         url = f"https://github.com/aquasecurity/trivy/releases/download/v{version}/{archive_name}"
 
@@ -493,11 +510,12 @@ def find_or_install_trivy(install_budget_sec: float | None = None, progress=None
         # LLM-only than install an unverified binary.
         try:
             checksums = _fetch_trivy_checksums(version)
-        except Exception:
-            return None
+        except Exception as e:
+            return None, f"could not fetch Trivy's published checksums: {e}"
         expected_sha = checksums.get(archive_name)
         if not expected_sha:
-            return None
+            return None, (f"Trivy's checksum file for {version} does not list "
+                          f"{archive_name} — refusing to install unverified")
 
         os.makedirs(TOOLS_DIR, exist_ok=True)
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False, dir=TOOLS_DIR) as tmp:
@@ -508,7 +526,14 @@ def find_or_install_trivy(install_budget_sec: float | None = None, progress=None
                                     progress=progress)
             actual_sha = _hash_file_sha256(tmp_path)
             if actual_sha != expected_sha:
-                return None  # refuse silently — caller falls back to LLM-only
+                # Do NOT suggest retrying. A mismatch means the bytes we got are
+                # not the bytes upstream published.
+                return None, (
+                    "SHA-256 MISMATCH — refusing to install. Expected "
+                    f"{expected_sha[:16]}…, got {actual_sha[:16]}…. Do not retry "
+                    "blindly: this is either corruption in transit or an "
+                    "intercepting proxy serving different bytes."
+                )
             if archive_ext == ".zip":
                 with zipfile.ZipFile(tmp_path) as zf:
                     info = zf.getinfo(binary_name)
@@ -524,9 +549,11 @@ def find_or_install_trivy(install_budget_sec: float | None = None, progress=None
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
         os.chmod(TOOLS_TRIVY, 0o755)
-        return TOOLS_TRIVY
-    except Exception:
-        return None
+        return TOOLS_TRIVY, None
+    except _TrivyDownloadTimeout as e:
+        return None, f"{e} — retry, or use install_trivy for the full budget"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def detect_scan_level(path: str) -> tuple[int, str]:
@@ -966,18 +993,18 @@ def install_trivy(progress=None) -> dict:
         return {"ok": True, "action": "none", "path": TOOLS_TRIVY,
                 "note": "already installed — delete it first to re-download"}
 
-    path = find_or_install_trivy(install_budget_sec=_TRIVY_DOWNLOAD_BUDGET_SEC,
-                                 progress=progress)
+    path, reason = _resolve_trivy(install_budget_sec=_TRIVY_DOWNLOAD_BUDGET_SEC,
+                                  progress=progress)
     if not path:
         return {
             "ok": False,
             "action": "failed",
             "pin": _TRIVY_PIN,
-            "reason": (
-                "download, checksum verification, or extraction failed. Trivy is "
-                "optional — scans continue without CVE/secret coverage. Check "
-                "network access to github.com and retry, or install Trivy "
-                "yourself (e.g. brew install trivy) and tomofound will use it."
+            "reason": reason or "unknown failure",
+            "fallback": (
+                "Trivy is optional — scans continue without CVE/secret coverage. "
+                "You can also install it yourself (e.g. brew install trivy) and "
+                "tomofound will use that."
             ),
         }
     return {"ok": True, "action": "installed", "path": path, "version": _TRIVY_PIN}
@@ -1879,6 +1906,8 @@ def _install_tools_cli() -> int:
         else:
             rc = 1
             say(f"      SKIPPED — {result.get('reason', 'unknown error')}")
+            if result.get("fallback"):
+                say(f"      {result['fallback']}")
     except Exception as e:
         rc = 1
         say(f"      SKIPPED — {type(e).__name__}: {e}")
