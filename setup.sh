@@ -6,7 +6,23 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 1
 fi
 
-BASE_URL="https://raw.githubusercontent.com/rotoyang/tomofound/main"
+# The git ref this installer pulls the server and skill from.
+#
+# Pinned to a release tag, not `main`. tomofound pins Trivy, the ATR catalog
+# and the mcp SDK — every dependency it did not write — precisely because a
+# floating reference means a bad upstream commit reaches users before anyone
+# reviews it. Serving its own source off `main` while making that argument
+# about everyone else's was not defensible: a `curl | bash` installer would
+# hand every new install whatever happened to be on `main` that second.
+#
+# Bumping this is part of cutting a release: set it to the tag being cut, then
+# tag the commit that contains this line.
+#
+# Override for development against unreleased code:
+#     TOMOFOUND_REF=main bash setup.sh
+# which is an explicit, visible choice rather than the default.
+TOMOFOUND_REF="${TOMOFOUND_REF:-v0.5.0}"
+BASE_URL="https://raw.githubusercontent.com/rotoyang/tomofound/${TOMOFOUND_REF}"
 DATA_ROOT="$HOME/.tomofound"
 SERVER_DIR="$DATA_ROOT/server"
 SKILL_DIR="$DATA_ROOT/skills/security-scan"
@@ -161,6 +177,11 @@ echo ""
 
 mkdir -p "$SERVER_DIR" "$SKILL_DIR"
 echo "[1/4] Server modules + scan prompt"
+if [[ "$TOMOFOUND_REF" == "main" ]]; then
+  echo "      ⚠️  installing from the main branch — unreleased, unreviewed code"
+else
+  echo "      source: $TOMOFOUND_REF"
+fi
 
 # Every Python module trivy_server.py imports at runtime must be listed here.
 # When adding a new file under server/, also add it to this list AND to the
@@ -171,7 +192,15 @@ SERVER_FILES=(
   atr_catalog.py
 )
 for f in "${SERVER_FILES[@]}"; do
-  curl -fsSL "$BASE_URL/server/$f" -o "$SERVER_DIR/$f"
+  if ! curl -fsSL "$BASE_URL/server/$f" -o "$SERVER_DIR/$f"; then
+    echo ""
+    echo "❌ Could not fetch server/$f from $TOMOFOUND_REF."
+    echo "   If that release is not published yet, install from the branch"
+    echo "   deliberately:  TOMOFOUND_REF=main bash setup.sh"
+    echo "   Falling back automatically would defeat the point of pinning, so"
+    echo "   this stops here instead."
+    exit 1
+  fi
 done
 chmod +x "$SERVER_DIR/trivy_server.py"
 curl -fsSL "$BASE_URL/skills/security-scan/security-scan.md" -o "$SKILL_DIR/security-scan.md"
