@@ -154,10 +154,10 @@ Report against what was actually checked — never imply more than `scope` says:
   installed before treating this as exposure."
 
 If `skipped_reason` is `"trivy_unavailable"` and the response carries a `hint`
-about installing, Trivy simply isn't downloaded yet. The archive is ~165 MB, so
-an implicit install inside a scan is capped at a short budget on purpose —
-otherwise the client times the request out mid-download and every retry starts
-the fetch from zero. Do the install once, as its own call:
+about installing, Trivy simply isn't downloaded yet. An implicit install inside
+a scan is capped at a short budget on purpose — otherwise the client times the
+request out mid-download and every retry starts the ~48 MB fetch from zero. Do
+the install once, as its own call:
 
 ```
 Call MCP tool: install_trivy

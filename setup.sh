@@ -23,6 +23,8 @@ INSTALL_CLAUDE=1
 INSTALL_CODEX=1
 INSTALL_GEMINI=1
 CLEAN_INSTALL=0
+SKIP_DOWNLOADS=0
+PYTHON_BIN="python3"
 
 usage() {
   cat <<'EOF'
@@ -37,6 +39,11 @@ Usage: ./setup.sh [--all|--claude|--codex|--gemini] [--clean]
              binary) before installing. Confirms with a 5-second abort window.
              Default behaviour preserves these, so --clean is only needed when
              you want a genuinely fresh install.
+  --no-downloads
+             Skip the Python environment, the ATR rule catalog (~28 MB) and
+             Trivy (~48 MB). The scanner installs and runs, with reduced
+             coverage, until you fetch them later via the atr_update and
+             install_trivy tools. Useful on metered or air-gapped machines.
 EOF
 }
 
@@ -64,6 +71,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --clean)
       CLEAN_INSTALL=1
+      ;;
+    --no-downloads)
+      SKIP_DOWNLOADS=1
       ;;
     -h|--help)
       usage
@@ -137,8 +147,20 @@ if [[ "$CLEAN_INSTALL" -eq 1 && -d "$DATA_ROOT" ]]; then
 fi
 
 echo "Setting up tomofound..."
+if [[ "$SKIP_DOWNLOADS" -eq 0 ]]; then
+  echo ""
+  echo "This installs the scanner and its two data sources:"
+  echo "   • Agent Threat Rules catalog   ~28 MB"
+  echo "   • Trivy CVE / secret scanner   ~48 MB  (~165 MB once unpacked)"
+  echo "   Roughly 76 MB of downloads, ~200 MB on disk. Allow a few minutes"
+  echo "   on a slow link."
+  echo "   Progress is printed for each step — it is not stuck."
+  echo "   Skip both with --no-downloads (scans still run, with less coverage)."
+fi
+echo ""
 
 mkdir -p "$SERVER_DIR" "$SKILL_DIR"
+echo "[1/4] Server modules + scan prompt"
 
 # Every Python module trivy_server.py imports at runtime must be listed here.
 # When adding a new file under server/, also add it to this list AND to the
@@ -153,7 +175,37 @@ for f in "${SERVER_FILES[@]}"; do
 done
 chmod +x "$SERVER_DIR/trivy_server.py"
 curl -fsSL "$BASE_URL/skills/security-scan/security-scan.md" -o "$SKILL_DIR/security-scan.md"
-echo "✅ Server (${#SERVER_FILES[@]} modules) + prompt source installed to $DATA_ROOT"
+echo "      done — ${#SERVER_FILES[@]} modules + prompt installed to $DATA_ROOT"
+
+# -----------------------------------------------------------------------------
+# Python env + data sources.
+#
+# Done here, not lazily, because everywhere else has a deadline the user does
+# not control: the venv would otherwise be built during Claude Desktop's first
+# server start, and Trivy downloaded inside an MCP tool call that the client
+# times out. An installer the user just invoked can take the time these need.
+#
+# `--install-tools` bootstraps the venv, re-execs into it (so PyYAML is
+# importable), then fetches the catalog and Trivy, printing progress to stderr.
+# -----------------------------------------------------------------------------
+if [[ "$SKIP_DOWNLOADS" -eq 1 ]]; then
+  echo ""
+  echo "[2/4] Python environment — skipped (--no-downloads)"
+  echo "[3/4] ATR catalog — skipped; run atr_update from your assistant when ready"
+  echo "[4/4] Trivy — skipped; run install_trivy from your assistant when ready"
+else
+  echo ""
+  echo "[2/4] Python environment + pinned dependencies"
+  # Non-fatal by design: a usable install without tools beats no install.
+  if "$PYTHON_BIN" "$SERVER_DIR/trivy_server.py" --install-tools; then
+    :
+  else
+    echo ""
+    echo "⚠️  One or more optional components did not install (see above)."
+    echo "    tomofound still works — re-run this installer, or ask your"
+    echo "    assistant to run atr_update / install_trivy later."
+  fi
+fi
 
 # -----------------------------------------------------------------------------
 # Post-install reconciliation: warn about orphan .py files in server/ that the

@@ -24,7 +24,7 @@ tomofound is **install once, then use it from Claude, Codex, or Gemini CLI**:
 
 1. Run `setup.sh` one time to install the MCP server and scan-rule prompt.
 2. Add the scan-rule prompt as a **Skill** in Claude Desktop App (one-time drag-and-drop).
-3. From then on, type `/security-scan` in any Claude **chat** to scan — no further setup, no per-scan installation, no Trivy install (auto-handled on first scan).
+3. From then on, type `/security-scan` in any Claude **chat** to scan — no further setup, no per-scan installation. The installer has already fetched the rule catalog and Trivy, so the first scan is a scan, not a download.
 
 ## Requirements
 
@@ -77,10 +77,17 @@ Restart Gemini CLI or open a new session. The `security-scan` skill is installed
 ### What the installer does
 
 1. Copies the MCP server (`trivy_server.py`) and the scan-rule prompt (`security-scan.md`) into `~/.tomofound/`
-2. Registers the `tomofound` MCP server in `~/Library/Application Support/Claude/claude_desktop_config.json`
-3. Installs the Codex skill wrapper into `~/.codex/skills/security-scan/SKILL.md`
-4. Registers the `tomofound` MCP server in `~/.codex/config.toml`
-5. Installs the Gemini CLI skill wrapper into `~/.gemini/skills/security-scan/SKILL.md`
+2. Builds the Python virtualenv at `~/.tomofound/venv/` and installs the pinned dependencies
+3. Downloads the pinned ATR rule catalog (~28 MB) into `~/.tomofound/catalogs/atr/`
+4. Downloads and SHA-256-verifies the pinned Trivy binary (~48 MB archive) into `~/.tomofound/tools/`
+5. Registers the `tomofound` MCP server in `~/Library/Application Support/Claude/claude_desktop_config.json`
+6. Installs the Codex skill wrapper into `~/.codex/skills/security-scan/SKILL.md`
+7. Registers the `tomofound` MCP server in `~/.codex/config.toml`
+8. Installs the Gemini CLI skill wrapper into `~/.gemini/skills/security-scan/SKILL.md`
+
+Steps 2–4 print progress as they go and are **not fatal**: if a download fails the installer says so and finishes, and the scanner runs with reduced coverage until you fetch them later. Skip them entirely with `--no-downloads` on a metered or air-gapped machine.
+
+Doing this work in the installer is deliberate. The alternative — building the venv on Claude Desktop's first server start and fetching Trivy inside a scan — puts long operations behind deadlines nobody controls, which is how a scan ends up quietly matching an eleven-release-old catalog, or a Trivy install times out and caches nothing.
 
 After this, you can forget about installation — just use `/security-scan` in Claude chat, the `security-scan` skill in Codex, or the `security-scan` skill in Gemini CLI.
 
@@ -155,7 +162,7 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 
 ### Trivy download fails / times out
 
-The Trivy archive is **~165 MB**. A scan will fetch it automatically, but only within a short budget — long enough on a fast link, and deliberately not long enough to hold the request open past your client's timeout. If it doesn't finish, the scan reports `trivy_unavailable` and continues without CVE/secret coverage rather than hanging.
+The Trivy archive is **~48 MB** (it expands to a ~165 MB binary). A scan will fetch it automatically, but only within a short budget — long enough on a fast link, and deliberately not long enough to hold the request open past your client's timeout. If it doesn't finish, the scan reports `trivy_unavailable` and continues without CVE/secret coverage rather than hanging.
 
 - **Install it once, on purpose:** ask your assistant to run the `install_trivy` tool. Same download, same SHA-256 verification, but as its own call with the full budget instead of a scan waiting on it. Then rescan.
 - Check network connectivity and proxy settings — the fetch goes to `github.com`.
