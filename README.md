@@ -155,9 +155,14 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 
 ### Trivy download fails / times out
 
-- Check network connectivity and proxy settings — the installer fetches Trivy from `github.com`.
-- Install Trivy manually (`brew install trivy` or download from [GitHub releases](https://github.com/aquasecurity/trivy/releases)) and ensure it is on `PATH`.
-- If the SHA-256 verification fails, retry the download; persistent failures suggest a network integrity issue (transparent proxy, captive portal).
+The Trivy archive is **~165 MB**. A scan will fetch it automatically, but only within a short budget — long enough on a fast link, and deliberately not long enough to hold the request open past your client's timeout. If it doesn't finish, the scan reports `trivy_unavailable` and continues without CVE/secret coverage rather than hanging.
+
+- **Install it once, on purpose:** ask your assistant to run the `install_trivy` tool. Same download, same SHA-256 verification, but as its own call with the full budget instead of a scan waiting on it. Then rescan.
+- Check network connectivity and proxy settings — the fetch goes to `github.com`.
+- Or install Trivy yourself (`brew install trivy`, or download from [GitHub releases](https://github.com/aquasecurity/trivy/releases)) and put it on `PATH`. tomofound uses an install you manage as-is; see the off-pin note under [Updating](#updating).
+- If the SHA-256 verification fails, retry; persistent failures suggest a network integrity issue (transparent proxy, captive portal). tomofound refuses to install an unverified binary and falls back to LLM-only rather than run it.
+
+Trivy is optional throughout. Without it you lose the CVE and secret passes; ATR, the Python AST/taint analysis, and LLM review all still run.
 
 ### ATR catalog not downloading
 

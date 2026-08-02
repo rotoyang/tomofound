@@ -2159,3 +2159,66 @@ def test_extract_publisher_none():
 
 def test_extract_publisher_case_normalized():
     assert _extract_publisher("Google/sheets-plugin") == "google"
+
+
+# --- Trivy install budget -----------------------------------------------
+
+def test_download_trivy_archive_stops_at_the_wall_clock_budget(tmp_path):
+    """urlopen's timeout bounds a stalled read, not total transfer time, so a
+    slow-but-steady link would otherwise hold an MCP call open indefinitely."""
+    import server.trivy_server as ts
+
+    class _SlowResp:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self, n):
+            self.reads += 1
+            return b"x" * 1024   # never ends; only the budget can stop this
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    clock = {"t": 0.0}
+
+    def fake_monotonic():
+        clock["t"] += 1.0        # each loop iteration burns a second
+        return clock["t"]
+
+    dest = tmp_path / "trivy.tar.gz"
+    with patch("urllib.request.urlopen", return_value=_SlowResp()), \
+         patch("time.monotonic", side_effect=fake_monotonic):
+        with pytest.raises(ts._TrivyDownloadTimeout) as exc:
+            ts._download_trivy_archive("https://example/trivy.tar.gz", str(dest), budget_sec=5)
+    assert "exceeded" in str(exc.value)
+
+
+def test_install_trivy_is_a_noop_when_trivy_is_already_on_path():
+    import server.trivy_server as ts
+    with patch("shutil.which", return_value="/opt/homebrew/bin/trivy"):
+        r = ts.install_trivy()
+    assert r["ok"] is True and r["action"] == "none"
+    assert r["path"] == "/opt/homebrew/bin/trivy"
+
+
+def test_install_trivy_reports_failure_actionably():
+    import server.trivy_server as ts
+    with patch("shutil.which", return_value=None), \
+         patch("os.path.exists", return_value=False), \
+         patch.object(ts, "find_or_install_trivy", return_value=None):
+        r = ts.install_trivy()
+    assert r["ok"] is False and r["action"] == "failed"
+    assert "brew install trivy" in r["reason"]
+
+
+def test_scan_paths_use_the_short_inline_install_budget():
+    """A scan must never silently become a multi-minute install: the client
+    times the request out anyway and the user retries a full fetch each time."""
+    import server.trivy_server as ts
+    src = open(ts.__file__, "r", encoding="utf-8").read()
+    assert src.count("install_budget_sec=_TRIVY_INLINE_INSTALL_BUDGET_SEC") == 2, \
+        "both scan_directory paths must bound an implicit install"
+    assert ts._TRIVY_INLINE_INSTALL_BUDGET_SEC < ts._TRIVY_DOWNLOAD_BUDGET_SEC
