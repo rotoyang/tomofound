@@ -309,6 +309,10 @@ _TRIVY_DOWNLOAD_BUDGET_SEC = 600
 # install that the client times out anyway. Past this we stop and tell the
 # caller to run install_trivy, which has the full budget.
 _TRIVY_INLINE_INSTALL_BUDGET_SEC = 45
+# Retries for a dropped connection. Each resumes via Range from what already
+# landed, so this is about surviving a blip, not re-fetching 48 MB three times.
+# The wall-clock budget spans all attempts, so this cannot extend the ceiling.
+_TRIVY_DOWNLOAD_ATTEMPTS = 3
 # The DOWNLOAD is the compressed archive: ~48 MB, measured. It expands to a
 # ~165 MB binary on disk — do not confuse the two when sizing budgets or
 # telling users what to expect. The cap defends against a malicious redirect
@@ -398,28 +402,32 @@ class _TrivyDownloadTimeout(RuntimeError):
     failure: the download was working, there just wasn't time for it here."""
 
 
-def _download_trivy_archive(url: str, dest_path: str, budget_sec: float | None = None,
-                            progress=None) -> int:
-    """Stream-download the Trivy archive under a socket timeout, a wall-clock
-    budget, and a hard byte cap.
-
-    The byte cap defends against a malicious redirect into a huge blob. The
-    wall-clock budget is separate and equally necessary: `urlopen(timeout=…)`
-    bounds how long one read may stall, not how long the transfer may take, so
-    a slow-but-steady link would otherwise hold an MCP tool call open forever.
-    Returns bytes_written. Raises `_TrivyDownloadTimeout` if the budget runs
-    out, or the underlying error on any other failure."""
+def _download_trivy_attempt(url: str, dest_path: str, resume_from: int,
+                            deadline, budget_sec, progress) -> tuple[int, int]:
+    """One HTTP attempt. Appends from `resume_from` when the server honours a
+    Range request. Returns `(total_written, content_total)`."""
     import time
 
-    deadline = (time.monotonic() + budget_sec) if budget_sec else None
-    written = 0
-    with urllib.request.urlopen(url, timeout=_TRIVY_SOCKET_TIMEOUT_SEC) as resp:
+    headers = {}
+    if resume_from:
+        headers["Range"] = f"bytes={resume_from}-"
+    req = urllib.request.Request(url, headers=headers)
+
+    with urllib.request.urlopen(req, timeout=_TRIVY_SOCKET_TIMEOUT_SEC) as resp:
+        # A server may ignore Range and send the whole body with 200. Appending
+        # then would splice the file's first bytes in twice and fail the
+        # checksum for a reason nobody could diagnose, so restart cleanly.
+        partial = resp.status == 206
+        written = resume_from if partial else 0
+        mode = "ab" if partial else "wb"
         try:
-            total = int(resp.headers.get("Content-Length") or 0)
+            length = int(resp.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
-            total = 0
-        next_tick = 0
-        with open(dest_path, "wb") as out:
+            length = 0
+        total = (written + length) if partial else length
+
+        next_tick = written
+        with open(dest_path, mode) as out:
             while True:
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _TrivyDownloadTimeout(
@@ -441,9 +449,65 @@ def _download_trivy_archive(url: str, dest_path: str, budget_sec: float | None =
                 if progress is not None and written >= next_tick:
                     progress(written, total)
                     next_tick = written + 4 * 1024 * 1024
-    if progress is not None:
-        progress(written, total or written)
-    return written
+    return written, total
+
+
+def _download_trivy_archive(url: str, dest_path: str, budget_sec: float | None = None,
+                            progress=None) -> int:
+    """Stream-download the Trivy archive, resuming and retrying on a dropped
+    connection, under a socket timeout, a wall-clock budget and a byte cap.
+
+    A user's install died at 28 MB of 49 with the transfer visibly progressing:
+    the link dropped, and with no resume the next attempt would restart from
+    zero and likely die again around the same place. So a transient failure now
+    retries with `Range: bytes=N-`, keeping what already landed.
+
+    Resuming is safe precisely because the assembled file is SHA-256 verified
+    against Trivy's published checksum afterwards — a spliced or corrupted
+    resume cannot pass that, and we refuse to install on mismatch.
+
+    The byte cap defends against a malicious redirect into a huge blob. The
+    wall-clock budget is separate and equally necessary: `urlopen(timeout=…)`
+    bounds how long one read may stall, not how long the transfer may take, so
+    a slow-but-steady link would otherwise hold an MCP tool call open forever.
+    It spans every attempt, so retrying cannot extend the ceiling.
+
+    Returns bytes_written. Raises `_TrivyDownloadTimeout` if the budget runs
+    out, or the last underlying error once retries are exhausted."""
+    import time
+
+    deadline = (time.monotonic() + budget_sec) if budget_sec else None
+    resume_from = 0
+    last_error = None
+
+    for attempt in range(_TRIVY_DOWNLOAD_ATTEMPTS):
+        try:
+            written, total = _download_trivy_attempt(
+                url, dest_path, resume_from, deadline, budget_sec, progress)
+            if progress is not None:
+                progress(written, total or written)
+            return written
+        except _TrivyDownloadTimeout:
+            raise                      # budget is a ceiling, not a retryable error
+        except Exception as e:
+            last_error = e
+            # Resume from whatever actually reached disk, not from what we
+            # think we wrote — a partial final write would otherwise offset
+            # every subsequent byte.
+            resume_from = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+            if attempt == _TRIVY_DOWNLOAD_ATTEMPTS - 1:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            if progress is not None and resume_from:
+                progress(resume_from, 0)
+            time.sleep(min(2 ** attempt, 8))
+
+    raise RuntimeError(
+        f"{type(last_error).__name__}: {last_error} "
+        f"(gave up after {_TRIVY_DOWNLOAD_ATTEMPTS} attempts, "
+        f"{resume_from / 1048576:.0f} MB fetched)"
+    )
 
 
 def find_or_install_trivy(install_budget_sec: float | None = None, progress=None) -> str | None:

@@ -2171,6 +2171,7 @@ def test_download_trivy_archive_stops_at_the_wall_clock_budget(tmp_path):
     class _SlowResp:
         def __init__(self):
             self.reads = 0
+            self.status = 200                        # full body, no Range honoured
             self.headers = {"Content-Length": "0"}   # unknown size, as a real CDN may report
 
         def read(self, n):
@@ -2274,3 +2275,133 @@ def test_install_tools_cli_writes_progress_to_stderr_only():
         stripped = line.strip()
         if stripped.startswith("print(") or " print(" in stripped:
             assert "file=sys.stderr" in stripped, f"install-tools print without stderr: {stripped}"
+
+
+# --- Trivy download resume / retry --------------------------------------
+
+class _FlakyResp:
+    """Serves `payload`, honouring Range, but dies mid-stream on chosen attempts."""
+
+    def __init__(self, payload, die_after=None, honour_range=True, status_override=None):
+        self.payload = payload
+        self.die_after = die_after
+        self.honour_range = honour_range
+        self.status_override = status_override
+        self.start = 0
+        self.pos = 0
+        self.served = 0
+
+    def _open(self, req):
+        rng = req.headers.get("Range") or req.headers.get("range")
+        self.start = 0
+        if rng and self.honour_range:
+            self.start = int(rng.split("=")[1].split("-")[0])
+        self.pos = self.start
+        body = self.payload[self.start:]
+        self.status = self.status_override or (206 if (rng and self.honour_range) else 200)
+        self.headers = {"Content-Length": str(len(body))}
+        self.served = 0
+        return self
+
+    def read(self, n):
+        if self.die_after is not None and self.served >= self.die_after:
+            raise ConnectionResetError("Connection reset by peer")
+        chunk = self.payload[self.pos:self.pos + n]
+        self.pos += len(chunk)
+        self.served += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_download_resumes_after_a_dropped_connection(tmp_path):
+    """The reported failure: 28 MB of 49 with the transfer progressing, then a
+    reset. Without resume the retry restarts from zero and dies again around
+    the same place."""
+    import server.trivy_server as ts
+    payload = bytes(range(256)) * 400          # 102,400 bytes
+    dest = tmp_path / "trivy.tar.gz"
+    state = {"attempt": 0}
+
+    def fake_urlopen(req, *a, **kw):
+        state["attempt"] += 1
+        state.setdefault("ranges", []).append(
+            req.headers.get("Range") or req.headers.get("range"))
+        # die halfway through the first attempt only
+        srv = _FlakyResp(payload, die_after=50_000 if state["attempt"] == 1 else None)
+        opened = srv._open(req)
+        state.setdefault("servers", []).append(srv)
+        return opened
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        written = ts._download_trivy_archive("https://example/t.tar.gz", str(dest))
+
+    assert state["attempt"] == 2, "should have retried exactly once"
+    assert written == len(payload)
+    assert dest.read_bytes() == payload, "resumed file must be byte-identical"
+
+    # The point of resuming is transferring less, not merely ending up correct:
+    # a plain restart also yields the right file. Assert the retry asked for a
+    # Range and moved only the remainder.
+    assert state["ranges"][0] is None, "first attempt must not send Range"
+    assert state["ranges"][1] is not None, "retry must resume via Range"
+    resumed_at = int(state["ranges"][1].split("=")[1].split("-")[0])
+    assert resumed_at > 0
+    second = state["servers"][1]
+    assert second.served == len(payload) - resumed_at, (
+        f"retry moved {second.served} bytes; resuming should have moved only "
+        f"{len(payload) - resumed_at}")
+
+
+def test_download_restarts_when_the_server_ignores_range(tmp_path):
+    """A server answering a Range request with a full 200 body would, if
+    appended, splice the first bytes in twice — passing byte counts while
+    failing the checksum for a reason nobody could diagnose."""
+    import server.trivy_server as ts
+    payload = bytes(range(256)) * 400
+    dest = tmp_path / "trivy.tar.gz"
+    state = {"attempt": 0}
+
+    def fake_urlopen(req, *a, **kw):
+        state["attempt"] += 1
+        srv = _FlakyResp(payload, die_after=50_000 if state["attempt"] == 1 else None,
+                         honour_range=False)
+        return srv._open(req)
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        written = ts._download_trivy_archive("https://example/t.tar.gz", str(dest))
+
+    assert written == len(payload)
+    assert dest.read_bytes() == payload, "must restart cleanly, not splice"
+
+
+def test_download_gives_up_after_the_attempt_limit(tmp_path):
+    import server.trivy_server as ts
+    payload = b"x" * 100_000
+    dest = tmp_path / "trivy.tar.gz"
+
+    def always_dies(req, *a, **kw):
+        # die_after=0 → the very first read raises, so no attempt makes
+        # progress and the retry loop must actually give up.
+        return _FlakyResp(payload, die_after=0)._open(req)
+
+    with patch("urllib.request.urlopen", side_effect=always_dies), \
+         patch("time.sleep"):
+        with pytest.raises(RuntimeError) as exc:
+            ts._download_trivy_archive("https://example/t.tar.gz", str(dest))
+    assert "gave up after" in str(exc.value)
+    assert "ConnectionResetError" in str(exc.value)
+
+
+def test_budget_expiry_is_not_retried(tmp_path):
+    """The budget is a ceiling. Retrying past it would defeat the reason it
+    exists — bounding how long an MCP call can be held open."""
+    import server.trivy_server as ts
+    src = open(ts.__file__, "r", encoding="utf-8").read()
+    body = src[src.index("def _download_trivy_archive"):]
+    body = body[:body.index("\ndef ", 1)]
+    assert "except _TrivyDownloadTimeout:" in body and "raise " in body
