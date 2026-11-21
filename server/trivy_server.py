@@ -19,7 +19,7 @@ _EXE = ".exe" if os.name == "nt" else ""
 # from upstream can ship; pin upper bounds at the next major to block
 # breaking changes.
 _PIP_DEPS = [
-    "mcp==1.28.1",
+    "mcp==1.30.0",
     "PyYAML>=6.0,<7",
 ]
 _MCP_PIN = _PIP_DEPS[0]  # back-compat name for any external reader of the constant
@@ -27,7 +27,7 @@ _MCP_PIN = _PIP_DEPS[0]  # back-compat name for any external reader of the const
 # Bump this string when _PIP_DEPS changes so existing venvs auto-reinstall the
 # new set on next server start. The bootstrap writes the current value to
 # ~/.tomofound/venv/.tomofound-deps; mismatch triggers a pip install --upgrade.
-_DEPS_VERSION = "3"
+_DEPS_VERSION = "4"
 
 
 def _lock_path(name: str) -> str:
