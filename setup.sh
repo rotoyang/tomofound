@@ -203,7 +203,20 @@ for f in "${SERVER_FILES[@]}"; do
   fi
 done
 chmod +x "$SERVER_DIR/trivy_server.py"
-curl -fsSL "$BASE_URL/skills/security-scan/security-scan.md" -o "$SKILL_DIR/security-scan.md"
+# Skill file: SKILL.md is the standard name, but releases up to v0.5.0 (the
+# default TOMOFOUND_REF) only ship it as security-scan.md, so fall back on a
+# failed fetch. Download to a temp file so a 404/partial transfer never leaves
+# a truncated SKILL.md behind.
+if ! curl -fsL "$BASE_URL/skills/security-scan/SKILL.md" -o "$SKILL_DIR/SKILL.md.tmp"; then
+  rm -f "$SKILL_DIR/SKILL.md.tmp"
+  curl -fsSL "$BASE_URL/skills/security-scan/security-scan.md" -o "$SKILL_DIR/SKILL.md.tmp"
+fi
+mv "$SKILL_DIR/SKILL.md.tmp" "$SKILL_DIR/SKILL.md"
+# Compatibility copy: the v0.5.0 server only looks for security-scan.md, so
+# without it a fresh install would not load the MCP prompt. Same bytes as
+# SKILL.md (copied locally, not re-fetched). TODO: remove once a release newer
+# than v0.5.0 is pinned as the default TOMOFOUND_REF.
+cp "$SKILL_DIR/SKILL.md" "$SKILL_DIR/security-scan.md"
 echo "      done — ${#SERVER_FILES[@]} modules + prompt installed to $DATA_ROOT"
 
 # -----------------------------------------------------------------------------

@@ -54,7 +54,7 @@ git is not the same as one `raw.githubusercontent.com` will serve:
 
 ```bash
 for f in server/trivy_server.py server/python_analyzer.py server/atr_catalog.py \
-         skills/security-scan/security-scan.md \
+         skills/security-scan/SKILL.md \
          integrations/codex/skills/security-scan/SKILL.md \
          integrations/gemini/skills/security-scan/SKILL.md; do
   curl -sS -o /dev/null -w "%{http_code}  $f\n" \

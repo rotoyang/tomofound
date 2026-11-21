@@ -709,6 +709,58 @@ def test_load_prompt_source_finds_skill_file():
     assert "discover_targets" in body
 
 
+def test_prompt_source_candidates_order():
+    import server.trivy_server as ts
+    got = [_posix(p) for p in ts._PROMPT_SOURCE_CANDIDATES]
+    assert len(got) == 4
+    assert [os.path.basename(p) for p in got] == [
+        "SKILL.md", "SKILL.md", "security-scan.md", "security-scan.md",
+    ]
+    # repo before DATA_ROOT within each filename pair
+    assert "/skills/security-scan/" in got[0] and ".." in got[0]
+    assert got[1].startswith(_posix(ts.DATA_ROOT))
+    assert ".." in got[2]
+    assert got[3].startswith(_posix(ts.DATA_ROOT))
+
+
+def _candidates_in(tmp_path, present):
+    names = ["a_SKILL.md", "b_SKILL.md", "c_legacy.md", "d_legacy.md"]
+    paths = []
+    for i, n in enumerate(names):
+        p = tmp_path / n
+        if i in present:
+            p.write_text(f"body{i}", encoding="utf-8")
+        paths.append(str(p))
+    return paths
+
+
+@pytest.mark.parametrize("present,expected", [
+    ({0, 1, 2, 3}, "body0"),
+    ({1, 2}, "body1"),   # new name in DATA_ROOT beats legacy name in repo
+    ({2, 3}, "body2"),
+    ({3}, "body3"),
+])
+def test_load_prompt_source_priority(tmp_path, monkeypatch, present, expected):
+    import server.trivy_server as ts
+    monkeypatch.setattr(ts, "_PROMPT_SOURCE_CANDIDATES", _candidates_in(tmp_path, present))
+    assert _load_prompt_source() == expected
+
+
+def test_load_prompt_source_none_found_raises(tmp_path, monkeypatch):
+    import server.trivy_server as ts
+    monkeypatch.setattr(ts, "_PROMPT_SOURCE_CANDIDATES", _candidates_in(tmp_path, set()))
+    with pytest.raises(FileNotFoundError):
+        _load_prompt_source()
+
+
+def test_load_prompt_source_skips_directory_candidate(tmp_path, monkeypatch):
+    import server.trivy_server as ts
+    paths = _candidates_in(tmp_path, {3})
+    os.mkdir(paths[0])
+    monkeypatch.setattr(ts, "_PROMPT_SOURCE_CANDIDATES", paths)
+    assert _load_prompt_source() == "body3"
+
+
 def test_render_prompt_default_keeps_arguments_placeholder():
     body = render_prompt()
     assert "ARGUMENTS" in body
@@ -727,7 +779,7 @@ def test_prompt_name_constant():
 
 
 @pytest.mark.parametrize("skill_path", [
-    "skills/security-scan/security-scan.md",
+    "skills/security-scan/SKILL.md",
     "integrations/codex/skills/security-scan/SKILL.md",
     "integrations/gemini/skills/security-scan/SKILL.md",
 ])
@@ -1173,6 +1225,7 @@ def test_catalogs_status_check_upstream_adds_drift_info(monkeypatch):
     assert atr_entry["upstream"]["upstream_latest"] == "v2"
 
 
+
 from server.trivy_server import compute_risk_score
 
 
@@ -1566,12 +1619,12 @@ def test_atr_scan_path_within_budget_no_budget_flag(tmp_path, monkeypatch):
     assert "budget_exceeded" not in r
     assert r["files_scanned"] == 1
 
-
 def test_atr_scan_path_dispatch_runs_in_thread(tmp_path, monkeypatch):
     """Regression: a long-running atr_scan_path must not block the MCP event
     loop so concurrent calls (e.g. atr_status) can still be served.
     Validates that the dispatch handler awaits asyncio.to_thread."""
     import asyncio
+
     import server.trivy_server as ts
 
     home = _fake_home(monkeypatch, tmp_path)

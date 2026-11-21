@@ -93,9 +93,15 @@ REPORTS_DIR = os.path.join(DATA_ROOT, "reports")
 SCAN_STATE_PATH = os.path.join(DATA_ROOT, "scan_state.json")
 
 _PROMPT_NAME = "security_scan"
+_REPO_SKILL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "security-scan")
+_DATA_SKILL_DIR = os.path.join(DATA_ROOT, "skills", "security-scan")
+# SKILL.md is the Claude Code plugin standard name; security-scan.md is the
+# legacy name, kept last so older installs keep loading.
 _PROMPT_SOURCE_CANDIDATES = [
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "security-scan", "security-scan.md"),
-    os.path.join(DATA_ROOT, "skills", "security-scan", "security-scan.md"),
+    os.path.join(_REPO_SKILL_DIR, "SKILL.md"),
+    os.path.join(_DATA_SKILL_DIR, "SKILL.md"),
+    os.path.join(_REPO_SKILL_DIR, "security-scan.md"),
+    os.path.join(_DATA_SKILL_DIR, "security-scan.md"),
 ]
 
 FILE_READ_LIMIT = 1024 * 1024  # 1 MB
