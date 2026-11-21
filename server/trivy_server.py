@@ -961,12 +961,12 @@ def read_file(path: str, root: str = None) -> dict:
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
             size = os.fstat(f.fileno()).st_size
             if is_cred:
-                name = os.path.basename(os.path.realpath(abs_path))
-                if not _is_credential_file(name):
-                    name = os.path.basename(abs_path)
+                # JSON masking only when both ends are known JSON credential files; anything
+                # .env-like on either end (e.g. ".env.json", or a symlink pair) is withheld.
+                names = {os.path.basename(abs_path).lower(), os.path.basename(os.path.realpath(abs_path)).lower()}
                 if size > CREDENTIAL_READ_LIMIT:
                     content = "content withheld: too large"
-                elif not name.lower().endswith(".json"):
+                elif not names <= _CREDENTIAL_BASENAMES:
                     # shortcut: no .env parsing at all (dotenv dialects disagree on quoting and
                     # escapes, so any line-level masking leaks); the file is not even read.
                     content = _ENV_WITHHELD

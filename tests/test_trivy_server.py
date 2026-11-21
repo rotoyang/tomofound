@@ -548,6 +548,24 @@ def test_read_file_env_style_content_is_withheld(tmp_path, name):
             assert fragment not in result["content"]
 
 
+@pytest.mark.parametrize("name", [".env.json", "prod.env.json"])
+def test_read_file_env_named_json_is_withheld(tmp_path, name):
+    f = tmp_path / name
+    f.write_text('{"SECRET_FRAGMENT": "abc123"}')
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["redacted"] is True and result["content"] == _ENV_WITHHELD
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_read_file_auth_json_symlink_to_env_is_withheld(tmp_path):
+    target = tmp_path / ".env"
+    target.write_text('{"SECRET_FRAGMENT": "abc123"}')
+    link = tmp_path / "auth.json"
+    link.symlink_to(target)
+    result = read_file(str(link), root=str(tmp_path))
+    assert result["redacted"] is True and result["content"] == _ENV_WITHHELD
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
 def test_read_file_env_symlink_is_withheld(tmp_path):
     target = tmp_path / ".env"
