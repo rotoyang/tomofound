@@ -907,6 +907,65 @@ def classify_trust(targets: list) -> dict:
     return {"targets": results, "summary": summary}
 
 
+CREDENTIAL_READ_LIMIT = 10 * 1024 * 1024  # 10 MiB
+_CREDENTIAL_BASENAMES = frozenset({"oauth_creds.json", "credentials.json", "auth.json"})
+_CREDENTIAL_NOTE = "credential file: values withheld; use trivy_scan for secret detection"
+_ENV_KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
+
+
+def _is_credential_file(path: str) -> bool:
+    """True for files whose values must never reach the LLM verbatim."""
+    name = os.path.basename(path).lower()
+    return name in _CREDENTIAL_BASENAMES or name == ".env" or name.endswith(".env") or name.startswith(".env.")
+
+
+def _redact_json_value(value):
+    # bool is an int subclass, so bool/None must be handled before numbers.
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return f"<redacted:{len(value)} chars>"
+    if isinstance(value, (int, float)):
+        return f"<redacted:{len(str(value))} chars>"
+    if isinstance(value, dict):
+        return {k: _redact_json_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_json_value(v) for v in value]
+    return "<redacted>"
+
+
+def _redact_lines(text: str) -> str:
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            out.append(line)
+            continue
+        m = _ENV_KEY_RE.match(line)
+        # Strict key regex plus two guards: a base64/PEM continuation line such as
+        # "MIIEvg...kq==" also matches KEY= and would leak as a "key". Reject names
+        # longer than 64 chars and lines whose remainder is only "=" padding.
+        # shortcut: a short alnum line ending in a single "=" still reads as KEY=;
+        # upgrade to PEM-block tracking if that leak matters.
+        if m and len(m.group(1)) <= 64 and set(line[m.end():].strip()) != {"="}:
+            out.append(f"{m.group(1)}=<redacted>")
+        else:
+            out.append("<redacted line>")
+    return "\n".join(out)
+
+
+def _redact_credential_text(name: str, text: str) -> str:
+    # shortcut: .env-style files are never parsed as JSON; a JSON-named file that
+    # fails to parse falls back to line mode. Upgrade if quoted multi-line .env values matter.
+    if name.lower().endswith(".json"):
+        try:
+            parsed = json.loads(text.lstrip("﻿"))
+            return json.dumps(_redact_json_value(parsed), indent=2, ensure_ascii=False)
+        except (ValueError, RecursionError):
+            pass
+    return _redact_lines(text)
+
+
 def read_file(path: str, root: str = None) -> dict:
     abs_path = os.path.abspath(os.path.expanduser(path))
     allowed = [_ensure_trailing_sep(p) for p in _READ_ALLOWED_PREFIXES]
@@ -918,9 +977,21 @@ def read_file(path: str, root: str = None) -> dict:
         return {"error": "path not permitted"}
     if not os.path.isfile(abs_path):
         return {"error": "file not found"}
+    # Check the resolved target too so a harmless-named symlink can't bypass redaction.
+    is_cred = _is_credential_file(abs_path) or _is_credential_file(os.path.realpath(abs_path))
     try:
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
             size = os.fstat(f.fileno()).st_size
+            if is_cred:
+                if size > CREDENTIAL_READ_LIMIT:
+                    content = "content withheld: too large"
+                else:
+                    # No FILE_READ_LIMIT truncation: JSON must be complete to be masked.
+                    name = os.path.basename(os.path.realpath(abs_path))
+                    if not _is_credential_file(name):
+                        name = os.path.basename(abs_path)
+                    content = _redact_credential_text(name, f.read())
+                return {"redacted": True, "content": content, "size_bytes": size, "note": _CREDENTIAL_NOTE}
             if size <= FILE_READ_LIMIT:
                 return {"content": f.read(), "size_bytes": size}
             return {"content": f.read(FILE_READ_LIMIT), "size_bytes": size, "truncated": True}

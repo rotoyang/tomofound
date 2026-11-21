@@ -15,6 +15,7 @@ from server.trivy_server import (
     _STANDARD_ROOTS,
     CLONE_PREFIX,
     _extract_publisher,
+    _is_credential_file,
     _is_safe_root,
     _load_prompt_source,
     _plugin_from_path,
@@ -468,6 +469,144 @@ def test_read_file_returns_error_for_missing_file(tmp_path):
     result = read_file(str(tmp_path / "nonexistent.txt"), root=str(tmp_path))
     assert "error" in result
     assert "not found" in result["error"]
+
+
+# --- read_file credential redaction ---
+
+@pytest.mark.parametrize("name", [
+    "oauth_creds.json", "credentials.json", "auth.json", "AUTH.JSON",
+    ".env", ".ENV", ".env.local", ".env.production", "foo.env",
+])
+def test_is_credential_file_positive(name):
+    assert _is_credential_file("/x/y/" + name)
+
+
+@pytest.mark.parametrize("name", [
+    "SKILL.md", "settings.json", "environment.json", "my.env.bak", "config.toml",
+])
+def test_is_credential_file_negative(name):
+    assert not _is_credential_file("/x/y/" + name)
+
+
+_NOTE = "credential file: values withheld; use trivy_scan for secret detection"
+
+
+def test_read_file_redacts_oauth_creds_json(tmp_path):
+    f = tmp_path / "oauth_creds.json"
+    f.write_text(json.dumps({
+        "access_token": "ya29.SECRETTOKEN", "refresh_token": "1//REFRESH",
+        "expiry_date": 1760000000000, "scopes": ["a-scope", "b-scope"],
+        "nested": {"flag": True, "none": None, "empty": "", "金鑰": "密碼值"},
+    }))
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["redacted"] is True
+    assert result["note"] == _NOTE
+    assert result["size_bytes"] == f.stat().st_size
+    for secret in ("ya29", "SECRETTOKEN", "REFRESH", "1760000000000", "a-scope", "密碼值"):
+        assert secret not in result["content"]
+    data = json.loads(result["content"])
+    assert data["access_token"] == "<redacted:16 chars>"
+    assert data["expiry_date"] == "<redacted:13 chars>"
+    assert data["scopes"] == ["<redacted:7 chars>", "<redacted:7 chars>"]
+    assert data["nested"] == {"flag": True, "none": None, "empty": "<redacted:0 chars>",
+                              "金鑰": "<redacted:3 chars>"}
+
+
+def test_read_file_redacts_codex_auth_json(tmp_path):
+    f = tmp_path / "auth.json"
+    f.write_text(json.dumps({"OPENAI_API_KEY": "sk-abcdef123456",
+                             "tokens": {"id_token": "eyJhbGciOi"}}))
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["redacted"] is True
+    assert "sk-abcdef" not in result["content"] and "eyJhbGciOi" not in result["content"]
+    assert set(json.loads(result["content"])) == {"OPENAI_API_KEY", "tokens"}
+
+
+def test_read_file_redacts_gemini_env(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("# gemini\n\nGEMINI_API_KEY=AIzaSECRET==\nexport TOKEN = abc=def # note\nEMPTY=\n")
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["redacted"] is True and result["note"] == _NOTE
+    assert result["content"] == (
+        "# gemini\n\nGEMINI_API_KEY=<redacted>\nTOKEN=<redacted>\nEMPTY=<redacted>"
+    )
+
+
+def test_read_file_redacts_env_local_with_pem_continuation(tmp_path):
+    f = tmp_path / ".env.local"
+    f.write_text("KEY=v\r\nMIIEvgIBADANBgkq==\n  # keep\nnot a pair\n")
+    result = read_file(str(f), root=str(tmp_path))
+    assert "MIIEvg" not in result["content"]
+    assert result["content"].split("\n") == [
+        "KEY=<redacted>", "<redacted line>", "  # keep", "<redacted line>"]
+
+
+def test_read_file_broken_json_falls_back_to_lines(tmp_path):
+    f = tmp_path / "auth.json"
+    f.write_text('{\n  "token": "SECRETVALUE",\n  oops\n')
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["redacted"] is True
+    assert "SECRETVALUE" not in result["content"]
+    assert "<redacted line>" in result["content"]
+
+
+def test_read_file_redacts_json_bom_and_list_root(tmp_path):
+    f = tmp_path / "credentials.json"
+    f.write_text("﻿" + json.dumps([{"k": "secret"}, "plain", 5]), encoding="utf-8")
+    result = read_file(str(f), root=str(tmp_path))
+    assert json.loads(result["content"]) == [{"k": "<redacted:6 chars>"}, "<redacted:5 chars>", "<redacted:1 chars>"]
+
+
+def test_read_file_deeply_nested_json_does_not_leak(tmp_path):
+    f = tmp_path / "auth.json"
+    f.write_text("[" * 5000 + '"SECRETVALUE"' + "]" * 5000)
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["redacted"] is True
+    assert "SECRETVALUE" not in result["content"]
+
+
+def test_read_file_credential_not_truncated_below_10mib(tmp_path):
+    f = tmp_path / "auth.json"
+    f.write_text(json.dumps({"a": "x" * (2 * 1024 * 1024), "z_last": "tail"}))
+    result = read_file(str(f), root=str(tmp_path))
+    assert "truncated" not in result
+    assert "z_last" in json.loads(result["content"])
+
+
+def test_read_file_credential_over_10mib_withheld(tmp_path):
+    f = tmp_path / "auth.json"
+    f.write_text(json.dumps({"a": "x" * (10 * 1024 * 1024 + 1)}))
+    result = read_file(str(f), root=str(tmp_path))
+    assert result == {"redacted": True, "content": "content withheld: too large",
+                      "size_bytes": f.stat().st_size, "note": _NOTE}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_read_file_symlink_to_credential_is_redacted(tmp_path):
+    target = tmp_path / "auth.json"
+    target.write_text('{"token": "SECRETVALUE"}')
+    link = tmp_path / "harmless.txt"
+    link.symlink_to(target)
+    result = read_file(str(link), root=str(tmp_path))
+    assert result["redacted"] is True
+    assert "SECRETVALUE" not in result["content"]
+    assert json.loads(result["content"]) == {"token": "<redacted:11 chars>"}
+
+
+def test_read_file_regular_files_unchanged(tmp_path):
+    (tmp_path / "settings.json").write_text('{"model": "x"}')
+    (tmp_path / "SKILL.md").write_text("# skill\nKEY=value\n")
+    r1 = read_file(str(tmp_path / "settings.json"), root=str(tmp_path))
+    r2 = read_file(str(tmp_path / "SKILL.md"), root=str(tmp_path))
+    assert r1 == {"content": '{"model": "x"}', "size_bytes": 14}
+    assert r2["content"] == "# skill\nKEY=value\n" and "redacted" not in r2
+
+
+def test_atr_scan_path_still_reads_credential_file(tmp_path):
+    f = tmp_path / "auth.json"
+    f.write_text('{"k": "v"}')
+    result = atr_scan_path(str(f), root=str(tmp_path))
+    assert "redacted" not in result
 
 
 # --- platform path coverage ---
