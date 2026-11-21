@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Trivy MCP server for tomofound — security scanner for AI tool extensions."""
 
-import sys, os
+import contextlib
+import os
+import sys
+import time
 
 # Build with os.path.join, NOT expanduser("~/.tomofound/venv"): on Windows
 # expanduser keeps the literal's forward slashes (C:\Users\u/.tomofound/venv),
@@ -27,31 +30,152 @@ _MCP_PIN = _PIP_DEPS[0]  # back-compat name for any external reader of the const
 _DEPS_VERSION = "3"
 
 
+def _lock_path(name: str) -> str:
+    """Lock files live beside the venv in ~/.tomofound/. Derived from VENV at
+    call time so there is a single definition of where the data root is."""
+    return os.path.join(os.path.dirname(VENV), name)
+
+
+def _lock_acquire(f) -> None:
+    """Block until this process holds an exclusive lock on open file `f`."""
+    if os.name == "nt":
+        import msvcrt
+        # LK_LOCK gives up after ~10 s (10 x 1 s retries) and raises, which is
+        # far shorter than a pip install or the 48 MB Trivy download another
+        # process may be doing. LK_NBLCK + our own retry loop waits as long as
+        # it takes. The locked region is byte 0..1 from the current position,
+        # so seek(0) before locking AND before unlocking to hit the same range.
+        while True:
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                time.sleep(0.25)
+    else:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+
+def _lock_release(f) -> None:
+    if os.name == "nt":
+        import msvcrt
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _file_lock(path: str):
+    """Cross-process exclusive lock (POSIX flock / Windows msvcrt.locking).
+
+    shortcut: waits indefinitely, no timeout — the OS drops the lock when the
+    holder dies, so a stale lock cannot wedge it; add a timeout if a live but
+    hung holder ever becomes a real problem.
+    The lock file is never unlinked: deleting it would let a later process lock
+    a different inode while an earlier one still holds the old one."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    f = open(path, "a+b")  # noqa: SIM115 — closed in the finally below
+    try:
+        _lock_acquire(f)
+        try:
+            yield
+        finally:
+            _lock_release(f)
+    finally:
+        f.close()
+
+
+def _read_deps_marker():
+    try:
+        with open(os.path.join(VENV, ".tomofound-deps"), encoding="utf-8") as f:
+            return f.read().strip()
+    except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
+        return None
+
+
+def _venv_ready(venv_python: str) -> bool:
+    return os.path.exists(venv_python) and _read_deps_marker() == _DEPS_VERSION
+
+
+# --- --ensure-tools fast path -------------------------------------------------
+# Everything below up to _tools_ready() runs BEFORE _bootstrap(), under the
+# system Python with no venv: standard library only (atr_catalog imports yaml,
+# so it must NOT be imported here) and no network. Imports are local because
+# the module-level stdlib imports further down have not executed yet.
+
+def _atr_pin_from_source():
+    """Read ATR_PIN out of atr_catalog.py as text, without importing it."""
+    import re
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "atr_catalog.py")
+    with open(path, encoding="utf-8") as f:
+        m = re.search(r"""^ATR_PIN\s*=\s*["']([^"']+)["']""", f.read(), re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _atr_ready() -> bool:
+    """True when the cached ATR catalog is the pinned version. Mirrors the
+    catalog module's own status check; any unreadable/odd meta.json means
+    "not ready"."""
+    import json
+    try:
+        pin = _atr_pin_from_source()
+        if not pin:
+            return False
+        meta_path = os.path.join(os.path.dirname(VENV), "catalogs", "atr", "meta.json")
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        return isinstance(meta, dict) and meta.get("version") == pin
+    except (OSError, ValueError):
+        return False
+
+
+def _trivy_ready() -> bool:
+    """Same rule as install_trivy(): trivy on PATH, or our managed copy."""
+    import shutil
+    managed = os.path.join(os.path.dirname(VENV), "tools", "trivy" + _EXE)
+    return bool(shutil.which("trivy")) or os.path.exists(managed)
+
+
+def _tools_ready() -> bool:
+    """True when venv deps, the pinned ATR catalog and Trivy are all in place.
+    Never raises: any surprise means "not ready" and falls to the slow path."""
+    try:
+        venv_python = os.path.join(VENV, _VENV_BIN, "python" + _EXE)
+        return _venv_ready(venv_python) and _atr_ready() and _trivy_ready()
+    except Exception:  # noqa: BLE001 — by contract any failure means "not ready"
+        return False
+
+
 def _bootstrap():
     venv_python = os.path.join(VENV, _VENV_BIN, "python" + _EXE)
-    marker = os.path.join(VENV, ".tomofound-deps")
-    deps_current = None
-    if os.path.isfile(marker):
-        try:
-            with open(marker) as f:
-                deps_current = f.read().strip()
-        except OSError:
-            deps_current = None
 
-    if not os.path.exists(venv_python) or deps_current != _DEPS_VERSION:
+    if not _venv_ready(venv_python):
         import subprocess
-        if not os.path.exists(venv_python):
-            subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
-        subprocess.run(
-            [os.path.join(VENV, _VENV_BIN, "pip" + _EXE), "install", *_PIP_DEPS,
-             "--upgrade", "--quiet"],
-            check=True,
-        )
-        try:
-            with open(marker, "w") as f:
-                f.write(_DEPS_VERSION)
-        except OSError:
-            pass  # marker is an optimisation, not a correctness gate
+        # Serialise venv creation / pip install across processes: the MCP
+        # server and a SessionStart hook (--ensure-tools) can start together
+        # and would otherwise corrupt each other's half-built venv.
+        with _file_lock(_lock_path("venv.lock")):
+            # Re-check now that we hold the lock — whoever held it before us
+            # may have finished the build while we waited.
+            if not _venv_ready(venv_python):
+                # stdout -> stderr: stdout is MCP's JSON-RPC channel.
+                if not os.path.exists(venv_python):
+                    subprocess.run([sys.executable, "-m", "venv", VENV],
+                                   check=True, stdout=sys.stderr)
+                subprocess.run(
+                    [os.path.join(VENV, _VENV_BIN, "pip" + _EXE), "install", *_PIP_DEPS,
+                     "--upgrade", "--quiet"],
+                    check=True, stdout=sys.stderr,
+                )
+                try:
+                    with open(os.path.join(VENV, ".tomofound-deps"), "w") as f:
+                        f.write(_DEPS_VERSION)
+                except OSError:
+                    pass  # marker is an optimisation, not a correctness gate
+        # Lock is released here, before any re-exec below.
 
     if not os.path.normcase(sys.executable).startswith(os.path.normcase(VENV)):
         if os.name == "nt":
@@ -65,14 +189,31 @@ def _bootstrap():
 
 
 if __name__ == "__main__":
+    # --ensure-tools fast path: everything already in place → exit 0 here, on
+    # the system Python, before the venv bootstrap / re-exec and with no network.
+    # (Nested `if`, not `... and ...`: a test locates the --install-tools
+    # dispatch by the first `if __name__ == "__main__" and` in the file.)
+    if "--ensure-tools" in sys.argv and _tools_ready():
+        raise SystemExit(0)
     _bootstrap()
 
-import subprocess, json, shutil, platform, urllib.request, urllib.error, tempfile, re, zipfile, ipaddress, socket, datetime
+import datetime
+import ipaddress
+import json
+import platform
+import re
+import shutil
+import socket
+import subprocess
+import tempfile
+import urllib.error
+import urllib.request
+import zipfile
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from python_analyzer import analyze_python  # noqa: E402
-import atr_catalog  # noqa: E402
+import atr_catalog
+from python_analyzer import analyze_python
 
 
 def _home_path(*parts: str) -> str:
@@ -1034,7 +1175,7 @@ def normalize_trivy(results: dict) -> dict:
 # Bumblebee) should plug in here so the user always sees one consolidated
 # block at the top of the report.
 
-_TRIVY_VERSION_RE = re.compile(r"^Version:\s*(\S+)", re.M)
+_TRIVY_VERSION_RE = re.compile(r"^Version:\s*(\S+)", re.MULTILINE)
 _TRIVY_DB_UPDATED_RE = re.compile(r"UpdatedAt:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9:.]+)")
 
 
@@ -1914,7 +2055,7 @@ def cleanup_clone(path: str) -> dict:
     return {"ok": True}
 
 
-def _install_tools_cli() -> int:
+def _install_tools_cli(skip_current_atr: bool = False) -> int:
     """`--install-tools`: fetch the ATR catalog and Trivy, with progress.
 
     Run by setup.sh so the two large downloads happen while the user is sitting
@@ -1938,11 +2079,17 @@ def _install_tools_cli() -> int:
 
     say("[3/4] Agent Threat Rules catalog (~28 MB)")
     try:
-        result = atr_catalog.update_catalog()
-        if result.get("ok"):
+        # --install-tools always re-fetches; --ensure-tools passes
+        # skip_current_atr so a missing Trivy does not re-download the catalog.
+        result = None
+        if skip_current_atr and _atr_ready():
+            say(f"      already current — {atr_catalog.ATR_PIN}")
+        else:
+            result = atr_catalog.update_catalog()
+        if result is not None and result.get("ok"):
             say(f"      done — {atr_catalog.ATR_PIN}, {result['rules_compiled']} rules compiled "
                 f"of {result['rules_total']} files")
-        else:
+        elif result is not None:
             rc = 1
             say(f"      SKIPPED — {result.get('error', 'unknown error')}")
             say("      Scans still run; ATR pre-filter is disabled until you run atr_update.")
@@ -1979,6 +2126,23 @@ def _install_tools_cli() -> int:
     return rc
 
 
+def _ensure_tools_cli() -> int:
+    """`--ensure-tools`: idempotent top-up for a Claude Code SessionStart hook.
+
+    Reached only when the stdlib fast path (see _tools_ready) found something
+    missing; _bootstrap() has already built the venv. Downloads are serialised
+    by tools.lock (a different file from venv.lock, so the two never nest) so
+    two hooks racing at session start fetch once, not twice. All output goes to
+    stderr — stdout is MCP's JSON-RPC channel."""
+    with _file_lock(_lock_path("tools.lock")):
+        # Re-check under the lock: a process that held it before us may have
+        # just finished the download.
+        if _tools_ready():
+            print("tomofound: tools already ready", file=sys.stderr, flush=True)
+            return 0
+        return _install_tools_cli(skip_current_atr=True)
+
+
 if __name__ == "__main__" and "--install-tools" in sys.argv:
     # _bootstrap() has already run at import time and re-exec'd us into the
     # venv, so PyYAML is importable here — which is why this cannot live in
@@ -1986,11 +2150,18 @@ if __name__ == "__main__" and "--install-tools" in sys.argv:
     raise SystemExit(_install_tools_cli())
 
 
+if __name__ == "__main__" and "--ensure-tools" in sys.argv:
+    # Slow path only: the all-ready case already exited 0 at the top of the
+    # file, before _bootstrap().
+    raise SystemExit(_ensure_tools_cli())
+
+
 try:
+    import asyncio
+
+    from mcp import types
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp import types
-    import asyncio
 except ImportError:
     Server = None
 
