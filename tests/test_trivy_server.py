@@ -299,6 +299,17 @@ def test_find_or_install_trivy_uses_pin_never_releases_latest(tmp_path, monkeypa
     assert all(_TRIVY_PIN in u for u in seen_urls)
 
 
+def test_readme_supply_chain_tables_match_trivy_pin():
+    """CLAUDE.md: the README Supply chain tables must track _TRIVY_PIN — both
+    the Runtime dependencies row and the outbound download URL."""
+    from pathlib import Path
+
+    from server.trivy_server import _TRIVY_PIN
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    assert f"| Trivy CLI | `{_TRIVY_PIN}`" in readme
+    assert f"releases/download/v{_TRIVY_PIN}/" in readme
+
+
 # --- query_osv ---
 
 def test_query_osv_returns_vulns():

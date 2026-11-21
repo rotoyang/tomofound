@@ -473,7 +473,7 @@ _TRIVY_DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024
 # reviewed change — update the README Supply chain table in the same PR
 # (see CLAUDE.md). The CVE *database* Trivy consults still auto-updates
 # independently of the binary version, so scan results stay current.
-_TRIVY_PIN = "0.72.0"
+_TRIVY_PIN = "0.76.2"
 
 
 def _hash_file_sha256(path: str) -> str:
