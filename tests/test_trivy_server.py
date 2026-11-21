@@ -2924,3 +2924,35 @@ def test_file_lock_windows_retries_nonblocking_and_unlocks_same_region(tmp_path,
     assert all(c[1] == 1 for c in calls)
     assert all(c[2] == 0 for c in calls), "every lock/unlock must start at offset 0"
     assert len(sleeps) == 2
+
+
+def test_mcp_pin_and_deps_marker_bumped():
+    import server.trivy_server as ts
+    assert "mcp==1.30.0" in ts._PIP_DEPS
+    assert ts._MCP_PIN == "mcp==1.30.0"
+    assert ts._DEPS_VERSION == "4"
+    readme = open(os.path.join(os.path.dirname(__file__), "..", "README.md"), encoding="utf-8").read()
+    assert "| Python `mcp` SDK | `1.30.0` (exact pin)" in readme
+
+
+def test_old_deps_marker_forces_reinstall(tmp_path):
+    import server.trivy_server as ts
+    (tmp_path / ".tomofound-deps").write_text("3")
+    with patch.object(ts, "VENV", str(tmp_path)):
+        assert ts._read_deps_marker() == "3"
+        assert ts._read_deps_marker() != ts._DEPS_VERSION
+
+
+def test_mcp_list_tools_lists_every_tool():
+    import server.trivy_server as ts
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from mcp import types
+    assert ts.Server is not None
+    tools = asyncio.run(ts._list_tools())
+    assert tools and all(isinstance(t, types.Tool) for t in tools)
+    names = [t.name for t in tools]
+    assert len(names) == len(set(names))
+    prompts = asyncio.run(ts._list_prompts())
+    assert "security_scan" in [p.name for p in prompts]
