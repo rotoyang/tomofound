@@ -261,15 +261,46 @@ The registered skill predates the fix that aligned its declared name with its di
 
 ### Uninstall
 
+Remove tomofound the way you installed it. The plugin and `setup.sh` write to different places, so follow the subsection that matches your install. If you used both, do both.
+
+#### Claude Code plugin
+
+Inside Claude Code:
+
+```
+/plugin uninstall tomofound@tomofound
+```
+
+If you don't need the marketplace any more, remove it too:
+
+```
+/plugin marketplace remove tomofound
+```
+
+`/plugin uninstall` removes the plugin from Claude Code. It does **not** delete `~/.tomofound/`: the plugin keeps its data in that directory (the same one `setup.sh` uses), not in Claude Code's plugin data directory. So the venv, the Trivy binary, the ATR catalog and your scan reports all survive an uninstall. To remove them as well:
+
 ```bash
-# Remove server, reports, and auto-installed Trivy binary
 rm -rf ~/.tomofound
 ```
 
-Then:
+Only do this when no other client still uses tomofound. Claude Desktop chat, Codex and Gemini CLI installed through `setup.sh` share the same directory, so leave it in place if you still use any of them.
 
-1. In Claude Desktop App, open **Settings → Customize → Skills** and remove `security-scan`.
-2. Remove the `"tomofound"` key under `mcpServers` in `~/Library/Application Support/Claude/claude_desktop_config.json` (edit by hand — the file holds other Claude preferences too).
+#### `setup.sh`
+
+`setup.sh` writes to the locations below. Remove the ones you don't want any more.
+
+- **`~/.tomofound/`**: the MCP server, the skill prompts, the venv, `tools/trivy`, `catalogs/atr`, `reports`, and the `venv.lock` / `tools.lock` files. Remove it with `rm -rf ~/.tomofound`, but only when no other client still uses it (see the warning above).
+- **Claude Desktop**, two places:
+  - `~/Library/Application Support/Claude/claude_desktop_config.json`: delete the `"tomofound"` key under `mcpServers`. Edit the file by hand; it holds other Claude preferences too.
+  - **Settings → Customize → Skills**: remove the `security-scan` skill you added.
+- **Codex**, two places:
+  - Delete the directory `~/.codex/skills/security-scan/`.
+  - `~/.codex/config.toml`: delete the whole `[mcp_servers.tomofound]` table. Leave the rest of the file as it is.
+- **Gemini CLI**: delete the directory `~/.gemini/skills/security-scan/`. `setup.sh` does not register an MCP server for Gemini CLI, so there is no config to edit.
+
+If you also registered `tomofound` in Claude Code yourself (for example with `claude mcp add`), remove that registration with the commands in [Moving from `setup.sh` to the plugin](#moving-from-setupsh-to-the-plugin-claude-code).
+
+Afterwards, restart the apps you use: quit Claude Desktop fully with **Cmd-Q** and reopen it, and restart Codex or Gemini CLI.
 
 ## Usage
 
