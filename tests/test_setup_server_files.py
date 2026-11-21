@@ -28,6 +28,15 @@ _LITERAL_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 
 # --- Helpers ----------------------------------------------------------------
 
+def _top_module(dotted):
+    """Return the server_dir module name a dotted absolute import refers to.
+
+    'server.foo.bar' -> 'foo' (the package prefix is stripped, for both
+    'import server.foo' and 'from server.foo import bar'); 'foo.sub' -> 'foo'."""
+    parts = dotted.split(".")
+    return parts[1] if parts[0] == "server" and len(parts) > 1 else parts[0]
+
+
 def local_imports(source_text, server_dir):
     """Return the '<name>.py' filenames of server_dir modules that source_text
     imports.
@@ -42,7 +51,7 @@ def local_imports(source_text, server_dir):
     for node in ast.walk(ast.parse(source_text)):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                names.add(alias.name.split(".")[0])
+                names.add(_top_module(alias.name))
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 if node.module:
@@ -55,9 +64,8 @@ def local_imports(source_text, server_dir):
                 # from server import foo
                 names.update(a.name for a in node.names if a.name != "*")
             elif node.module:
-                parts = node.module.split(".")
-                # from server.foo import bar, else from foo.sub import bar
-                names.add(parts[1] if parts[0] == "server" and len(parts) > 1 else parts[0])
+                # from server.foo import bar, or from foo.sub import bar
+                names.add(_top_module(node.module))
     return {f"{name}.py" for name in names if (server_dir / f"{name}.py").is_file()}
 
 
@@ -152,6 +160,22 @@ def test_local_imports_recognise_each_import_form(tmp_path):
         "alpha.py", "beta.py", "gamma.py", "delta.py", "epsilon.py",
         "zeta.py", "eta.py", "theta.py",
     }
+
+
+@pytest.mark.parametrize("line", ["import server.leaf", "import server.leaf as alias"])
+def test_server_prefixed_plain_import_counts_as_local(tmp_path, line):
+    # Regression: "import server.leaf" used to resolve to "server", so leaf.py
+    # was silently dropped and a SERVER_FILES that omitted it still passed.
+    (tmp_path / "leaf.py").write_text("", encoding="utf-8")
+    entry = tmp_path / "entry.py"
+    entry.write_text(line + "\n", encoding="utf-8")
+
+    assert local_imports(line + "\n", tmp_path) == {"leaf.py"}
+
+    setup_text = "SERVER_FILES=(\n  entry.py\n)\n"
+    assert missing_server_files(entry, tmp_path, setup_text) == ["leaf.py"]
+    with pytest.raises(AssertionError, match="leaf.py"):
+        assert_server_files_complete(entry, tmp_path, setup_text)
 
 
 def test_local_module_closure_follows_transitive_imports(tmp_path):
