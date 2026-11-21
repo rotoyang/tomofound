@@ -21,7 +21,7 @@ Before opening a PR that adds a new runtime dependency, external binary, fetched
 2. Confirm the license actually covers the artifact we are consuming — some projects split engine code and rule data under different licenses; the license that matters is the one on what we read.
 3. Confirm our usage model is compatible. For v1, tomofound fetches and matches but does not redistribute upstream catalogs (downloads happen on the user's machine, on the user's behalf, under upstream's own terms). Adding a vendored snapshot to the repo is redistribution and requires a permissive license + LICENSE retention.
 4. Record the result in the README **Supply chain > Runtime dependencies** table (with a License column linking to the upstream LICENSE) AND in the README **Supply chain > Attribution** section.
-5. Reject GPL / AGPL / "no LICENSE file" / share-alike data licenses for v1 unless you can document why an exception is required and how it doesn't expose tomofound's own license (Apache-2.0) to virality.
+5. Reject GPL / AGPL / "no LICENSE file" / share-alike data licenses for v1 unless you can document why an exception is required and how it doesn't expose tomofound's own license (MIT) to virality.
 
 `docs/catalog-architecture.md` contains the full protocol (local design notes, gitignored). The Supply chain table in `README.md` is the user-facing artifact that must be kept current.
 
@@ -37,14 +37,29 @@ catalog and the mcp SDK, and serving its own source off a moving branch while
 making that argument about everyone else's does not hold up. A commit merged to
 `main` must not reach `curl | bash` installs until a release says so.
 
+The Claude Code plugin follows the same rule. `.claude-plugin/marketplace.json`
+points its plugin `source` at the `TOMOFOUND_REF` tag (never `main`, never a
+relative path), so `/plugin install` also serves nothing until a release says so.
+Three values name the release and must always agree; `tests/test_plugin_packaging.py`
+fails when they do not:
+
+| File | Field | Form |
+|---|---|---|
+| `setup.sh` | `TOMOFOUND_REF` default | `v0.6.0` |
+| `.claude-plugin/plugin.json` | `version` | `0.6.0` (no `v`) |
+| `.claude-plugin/marketplace.json` | `plugins[0].source.ref` | `v0.6.0` |
+
 Cutting a release, in this order:
 
-1. In the release PR, set `TOMOFOUND_REF` in `setup.sh` to the version being cut.
+1. In the release PR, bump **all three** together: `TOMOFOUND_REF` in `setup.sh`,
+   `version` in `.claude-plugin/plugin.json`, and `plugins[0].source.ref` in
+   `.claude-plugin/marketplace.json` to the version being cut.
 2. Merge it.
 3. Tag **that** commit and publish.
 
 Reversing 2 and 3 leaves `main` pointing at a tag that does not exist yet, and
-the documented installer fails for everyone who runs it in that window. The
+the documented installer fails for everyone who runs it in that window (for the
+plugin, `/plugin install` fails to clone the missing tag). The
 failure is loud and explains itself — it does not silently fall back to `main`,
 because that would reintroduce exactly the exposure the pin removes — but it is
 still a broken install command on the front page of the README.
@@ -64,3 +79,13 @@ done
 
 All six must return 200. `setup.ps1` carries its own `$BaseUrl` and needs the
 same bump whenever it is in play.
+
+The plugin files are fetched by `git clone` at the tag rather than through
+`raw.githubusercontent.com`, so also confirm the tag carries them:
+
+```bash
+git ls-tree -r --name-only <tag> | grep -E '^(\.claude-plugin/|\.mcp\.json$|hooks/hooks\.json$)'
+```
+
+It must list `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
+`.mcp.json` and `hooks/hooks.json`.
