@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/rotoyang/tomofound/main/setup.sh | 
 
 1. Open Claude Desktop App.
 2. Open **Settings → Customize → Skills**.
-3. Drag `~/.tomofound/skills/security-scan/security-scan.md` into the Skills list.
+3. Drag `~/.tomofound/skills/security-scan/SKILL.md` into the Skills list.
 4. Quit Claude fully (**Cmd-Q**) and reopen it.
 5. Verify: type `/` in any **chat** — `/security-scan` should appear in the slash menu.
 
@@ -86,7 +86,7 @@ Restart Gemini CLI or open a new session. The `security-scan` skill is installed
 
 ### What the installer does
 
-1. Copies the MCP server (`trivy_server.py`) and the scan-rule prompt (`security-scan.md`) into `~/.tomofound/`
+1. Copies the MCP server (`trivy_server.py`) and the scan-rule prompt (`SKILL.md`, plus a `security-scan.md` compatibility copy for older servers) into `~/.tomofound/`
 2. Builds the Python virtualenv at `~/.tomofound/venv/` and installs the pinned dependencies
 3. Downloads the pinned ATR rule catalog (~28 MB) into `~/.tomofound/catalogs/atr/`
 4. Downloads and SHA-256-verifies the pinned Trivy binary (~48 MB archive) into `~/.tomofound/tools/`
@@ -121,11 +121,11 @@ Re-run the same `curl | bash` command. Installation is **idempotent** — re-run
 
 #### 2. Updating the skill inside Claude Desktop (manual)
 
-When you drag `security-scan.md` into **Settings → Customize → Skills**, Claude Desktop takes **its own copy**. The installer cannot reach that copy, so refreshing `~/.tomofound/skills/` changes nothing about what Claude actually runs. Your registered skill keeps working — at whatever version you first added.
+When you drag `SKILL.md` into **Settings → Customize → Skills**, Claude Desktop takes **its own copy**. The installer cannot reach that copy, so refreshing `~/.tomofound/skills/` changes nothing about what Claude actually runs. Your registered skill keeps working — at whatever version you first added.
 
 To pick up a new version:
 
-1. Re-run the installer (step 1) so `~/.tomofound/skills/security-scan/security-scan.md` is current.
+1. Re-run the installer (step 1) so `~/.tomofound/skills/security-scan/SKILL.md` is current.
 2. Open **Settings → Customize → Skills**, remove the existing `security-scan` entry, and drag the refreshed file back in.
 3. Quit Claude fully (**Cmd-Q**) and reopen it.
 
@@ -296,7 +296,7 @@ Each scan produces a 0–100 risk score (severity-weighted across all findings) 
 
 ## How rules work
 
-Detection rules live in `skills/security-scan/security-scan.md` (installed locally to `~/.tomofound/skills/security-scan/security-scan.md`). The MCP server loads this file at startup and serves it as the Claude `/security-scan` prompt. Codex uses `integrations/codex/skills/security-scan/SKILL.md` and Gemini CLI uses `integrations/gemini/skills/security-scan/SKILL.md` as lightweight skill wrappers around the same MCP tools. To add a shared scan rule, edit the Claude prompt and the Codex/Gemini wrappers as needed, then re-run the installer.
+Detection rules live in `skills/security-scan/SKILL.md` (installed locally to `~/.tomofound/skills/security-scan/SKILL.md`, with a `security-scan.md` compatibility copy beside it until the pinned release catches up). The MCP server loads this file at startup and serves it as the Claude `/security-scan` prompt. Codex uses `integrations/codex/skills/security-scan/SKILL.md` and Gemini CLI uses `integrations/gemini/skills/security-scan/SKILL.md` as lightweight skill wrappers around the same MCP tools. To add a shared scan rule, edit the Claude prompt and the Codex/Gemini wrappers as needed, then re-run the installer.
 
 ## Reports
 
@@ -344,7 +344,7 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 |-------|--------|-------|
 | `server/trivy_server.py` | This repo | The MCP server itself |
 | `server/python_analyzer.py` | This repo | AST + taint static analysis |
-| `skills/security-scan/security-scan.md` | This repo | Detection rules loaded as an MCP prompt |
+| `skills/security-scan/SKILL.md` | This repo | Detection rules loaded as an MCP prompt |
 | `integrations/codex/skills/security-scan/SKILL.md` | This repo | Codex-side wrapper around the same MCP tools |
 | `integrations/gemini/skills/security-scan/SKILL.md` | This repo | Gemini CLI-side wrapper around the same MCP tools |
 | `setup.sh` | This repo | One-shot installer |
