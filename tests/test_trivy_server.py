@@ -522,138 +522,40 @@ def test_read_file_redacts_codex_auth_json(tmp_path):
     assert set(json.loads(result["content"])) == {"OPENAI_API_KEY", "tokens"}
 
 
-def test_read_file_redacts_gemini_env(tmp_path):
-    f = tmp_path / ".env"
-    f.write_text("# gemini\n\nGEMINI_API_KEY=AIzaSECRET==\nexport TOKEN = abc=def # note\nEMPTY=\n")
-    result = read_file(str(f), root=str(tmp_path))
-    assert result["redacted"] is True and result["note"] == _NOTE
-    # Comments and blank lines are dropped: only the key list comes back.
-    assert result["content"] == "GEMINI_API_KEY=<redacted>\nTOKEN=<redacted>\nEMPTY=<redacted>"
+_ENV_WITHHELD = "content withheld: .env-style credential file"
+
+# Bodies that defeated every earlier line-level .env parser (multi-line quoted values,
+# single-quote escapes, backticks, comments). None may reach the output now.
+_ENV_BODIES = [
+    "# gemini\n\nGEMINI_API_KEY=AIzaSECRET==\nexport TOKEN = abc=def # note\nEMPTY=\n",
+    "KEY=v\r\n# token=abc123\n  # SECRET_FRAGMENT\nnot a pair\n",
+    'PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nU0VDUkVU\n# TOP_SECRET\n-----END PRIVATE KEY-----"\nNEXT=1\n',
+    "A='x\\'\nSECRET_FRAGMENT=\n# TOP_SECRET\ny'\nB=abc123\n",
+    "TOKEN=`start\n# TOP_SECRET\nSECRET_FRAGMENT=\nend`\n",
+    "K" * 70 + '="start\n# TOP_SECRET\nSECRET_FRAGMENT=x"\n',
+]
 
 
-def test_read_file_redacts_env_local_drops_comments_and_unreadable_lines(tmp_path):
-    f = tmp_path / ".env.local"
-    f.write_text("KEY=v\r\n# token=abc123\n  # keep SECRET_COMMENT\nnot a pair\n!!weird secret!!\n")
-    result = read_file(str(f), root=str(tmp_path))
-    for fragment in ("abc123", "SECRET_COMMENT", "not a pair", "weird", "keep"):
-        assert fragment not in result["content"]
-    assert result["content"] == "KEY=<redacted>"
+@pytest.mark.parametrize("name", [".env", ".env.local", "foo.env", ".ENV.Production"])
+def test_read_file_env_style_content_is_withheld(tmp_path, name):
+    f = tmp_path / name
+    for body in _ENV_BODIES:
+        f.write_text(body)
+        result = read_file(str(f), root=str(tmp_path))
+        assert result == {"redacted": True, "content": _ENV_WITHHELD,
+                          "size_bytes": f.stat().st_size, "note": _NOTE}
+        for fragment in ("TOP_SECRET", "SECRET_FRAGMENT", "abc123", "AIzaSECRET", "U0VDUkVU"):
+            assert fragment not in result["content"]
 
 
-def test_read_file_env_multiline_double_quoted_pem(tmp_path):
-    f = tmp_path / ".env"
-    f.write_text(
-        'PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n'
-        "U0VDUkVUVkFMVUU=\n"
-        "QUJDREVGR0g==\n"
-        "# SECRET_VALUE\n"
-        "-----END PRIVATE KEY-----\"\n"
-        "NEXT=after\n"
-    )
-    result = read_file(str(f), root=str(tmp_path))
-    content = result["content"]
-    for fragment in ("BEGIN", "U0VDUkVU", "QUJDREVG", "SECRET_VALUE", "END PRIVATE", "after"):
-        assert fragment not in content
-    assert content.split("\n") == ["PRIVATE_KEY=<redacted>", "NEXT=<redacted>"]
-
-
-def test_read_file_env_multiline_single_quoted(tmp_path):
-    f = tmp_path / ".env.local"
-    f.write_text("CERT='line1SECRET=\n# hidden=comment\n\nKEY2=leak'\nOK=1\n")
-    result = read_file(str(f), root=str(tmp_path))
-    content = result["content"]
-    for fragment in ("line1SECRET", "hidden", "KEY2", "leak"):
-        assert fragment not in content
-    assert content.split("\n") == ["CERT=<redacted>", "OK=<redacted>"]
-
-
-def test_read_file_env_single_line_quoted_does_not_open_block(tmp_path):
-    f = tmp_path / ".env"
-    f.write_text('A="one"\n# comment dropped\nB=\'two\'\nC=`three`\n')
-    result = read_file(str(f), root=str(tmp_path))
-    assert result["content"] == "A=<redacted>\nB=<redacted>\nC=<redacted>"
-
-
-def test_read_file_env_unterminated_quote_redacts_rest(tmp_path):
-    f = tmp_path / ".env"
-    f.write_text('A="never closed\nB=secretB\n# secretC\n')
-    result = read_file(str(f), root=str(tmp_path))
-    assert result["content"] == "A=<redacted>"
-
-
-def test_read_file_env_backtick_multiline_value(tmp_path):
-    f = tmp_path / ".env"
-    f.write_text("TOKEN=`start\n# TOP_SECRET\nSECRET_FRAGMENT=\nend`\nNEXT=1\n")
-    result = read_file(str(f), root=str(tmp_path))
-    for fragment in ("TOP_SECRET", "SECRET_FRAGMENT", "start", "end"):
-        assert fragment not in result["content"]
-    assert result["content"].split("\n") == ["TOKEN=<redacted>", "NEXT=<redacted>"]
-
-
-def test_read_file_env_comment_with_secret_not_returned(tmp_path):
-    f = tmp_path / ".env"
-    f.write_text("# token=abc123\nA=1\n   # token=abc123\n")
-    result = read_file(str(f), root=str(tmp_path))
-    assert "abc123" not in result["content"]
-    assert result["content"] == "A=<redacted>"
-
-
-def test_read_file_env_output_is_only_key_lines(tmp_path):
-    f = tmp_path / ".env"
-    long_key = "K" * 70
-    f.write_text(
-        f'{long_key}="start\n# TOP_SECRET\nSECRET_FRAGMENT=x"\n'
-        "B='s1\nSECRET_FRAGMENT=\n# abc123\ns2'\n"
-        "C=`t1\nSECRET_FRAGMENT=\nt2`\n"
-        "# token=abc123\nD=ok\n"
-    )
-    result = read_file(str(f), root=str(tmp_path))
-    for fragment in ("TOP_SECRET", "SECRET_FRAGMENT", "abc123"):
-        assert fragment not in result["content"]
-    lines = result["content"].split("\n")
-    # Names over 64 chars are not echoed, but their quoted values are still skipped.
-    assert lines == ["B=<redacted>", "C=<redacted>", "D=<redacted>"]
-    assert long_key not in result["content"]
-
-
-def test_read_file_env_long_key_multiline_quoted_value(tmp_path):
-    # Key longer than 64 chars (and not a valid key shape for the next line) must still
-    # open quote tracking, including "#" lines inside the value.
-    f = tmp_path / ".env"
-    long_key = "K" * 70
-    f.write_text(f'{long_key}="start\n# TOP_SECRET\nmore_SECRET2"\nNEXT=1\n')
-    result = read_file(str(f), root=str(tmp_path))
-    assert "TOP_SECRET" not in result["content"] and "SECRET2" not in result["content"]
-    assert result["content"].split("\n") == ["NEXT=<redacted>"]
-
-
-@pytest.mark.parametrize(
-    "body, expected",
-    [
-        # Even backslash run before the quote: the quote closes the value.
-        ('A="C:\\\\"\nTOKEN="start\nSECRET_FRAGMENT=\nend"\nNEXT=1\n', ["A", "TOKEN", "NEXT"]),
-        # Odd run (\\\"): the quote is escaped, the value continues to the final quote.
-        ('A="x\\\\\\"y\nSECRET_FRAGMENT=\nz"\nNEXT=1\n', ["A", "NEXT"]),
-        # Single quotes do not process escapes: 'C:\' closes, next value is multi-line.
-        ("A='C:\\'\nTOKEN='start\nSECRET_FRAGMENT=\nend'\nNEXT=1\n", ["A", "TOKEN", "NEXT"]),
-        # Backtick quotes escape like double quotes.
-        ("A=`x\\``\nTOKEN=`s\nSECRET_FRAGMENT=\ne`\nNEXT=1\n", ["A", "TOKEN", "NEXT"]),
-    ],
-)
-def test_read_file_env_backslash_parity_in_quotes(tmp_path, body, expected):
-    f = tmp_path / ".env"
-    f.write_text(body)
-    result = read_file(str(f), root=str(tmp_path))
-    assert "SECRET_FRAGMENT" not in result["content"]
-    assert result["content"].split("\n") == [f"{k}=<redacted>" for k in expected]
-
-
-def test_read_file_env_non_key_line_opens_quote(tmp_path):
-    f = tmp_path / ".env"
-    f.write_text('not a key = "open\n# TOP_SECRET\nclose"\nA=1\n')
-    result = read_file(str(f), root=str(tmp_path))
-    assert "TOP_SECRET" not in result["content"]
-    assert result["content"] == "A=<redacted>"
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_read_file_env_symlink_is_withheld(tmp_path):
+    target = tmp_path / ".env"
+    target.write_text("A=SECRETVALUE\n")
+    link = tmp_path / "harmless.txt"
+    link.symlink_to(target)
+    result = read_file(str(link), root=str(tmp_path))
+    assert result["redacted"] is True and result["content"] == _ENV_WITHHELD
 
 
 def test_read_file_broken_json_withheld(tmp_path):

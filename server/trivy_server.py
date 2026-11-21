@@ -910,9 +910,7 @@ def classify_trust(targets: list) -> dict:
 CREDENTIAL_READ_LIMIT = 10 * 1024 * 1024  # 10 MiB
 _CREDENTIAL_BASENAMES = frozenset({"oauth_creds.json", "credentials.json", "auth.json"})
 _CREDENTIAL_NOTE = "credential file: values withheld; use trivy_scan for secret detection"
-_QUOTE_CHARS = ('"', "'", "`")
-_ENV_KEY_MAX = 64
-_ENV_KEY_RE =re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
+_ENV_WITHHELD = "content withheld: .env-style credential file"
 
 
 def _is_credential_file(path: str) -> bool:
@@ -936,69 +934,14 @@ def _redact_json_value(value):
     return "<redacted>"
 
 
-def _closes_quote(text: str, quote: str) -> bool:
-    """True if text contains an unescaped `quote` character.
-
-    Scans left to right so runs of backslashes are paired correctly: in `"` and backtick
-    values a backslash escapes the next character (so `\\\\"` closes but `\\"` does not).
-    Single quotes do not process escapes (dotenv convention).
-    """
-    escapes = quote != "'"
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if escapes and ch == "\\":
-            i += 2
-            continue
-        if ch == quote:
-            return True
-        i += 1
-    return False
-
-
-def _redact_lines(text: str) -> str:
-    """Reduce .env-style text to a key list: one `KEY=<redacted>` line per detected key.
-
-    Comments, blank lines and anything that is not a recognisable KEY= line are dropped
-    rather than echoed, so no free text from the file can reach the LLM.
-    """
-    out = []
-    open_quote = None  # quote char of a multi-line value we are inside, else None
-    for line in text.splitlines():
-        if open_quote:
-            # Inside a quoted multi-line value (e.g. a PEM key): every line, including
-            # "#" lines and "KEY=" lookalikes, is value content and is never a key.
-            if _closes_quote(line, open_quote):
-                open_quote = None
-            continue
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        # Quote tracking is independent of key shape: any line whose text after the first
-        # "=" opens a quote without closing it starts a multi-line value.
-        value = line.partition("=")[2].lstrip()
-        if value[:1] in _QUOTE_CHARS and not _closes_quote(value[1:], value[0]):
-            open_quote = value[0]
-        m = _ENV_KEY_RE.match(line)
-        # shortcut: an unquoted multi-line value cannot be told apart from new KEY= lines;
-        # an alnum-only continuation ending in "=" reads as KEY=. Dotenv-style quoting is
-        # the supported multi-line form.
-        # Names longer than _ENV_KEY_MAX are never real variables; do not echo them.
-        if m and len(m.group(1)) <= _ENV_KEY_MAX:
-            out.append(f"{m.group(1)}=<redacted>")
-    return "\n".join(out)
-
-
-def _redact_credential_text(name: str, text: str) -> str:
+def _redact_json_text(text: str) -> str:
     # A .json credential file that fails to parse is withheld entirely: line-mode masking
     # cannot be trusted on arbitrary broken JSON (strings may span lines).
-    if name.lower().endswith(".json"):
-        try:
-            parsed = json.loads(text.lstrip("﻿"))
-            return json.dumps(_redact_json_value(parsed), indent=2, ensure_ascii=False)
-        except (ValueError, RecursionError):
-            return "content withheld: unparseable JSON"
-    return _redact_lines(text)
+    try:
+        parsed = json.loads(text.lstrip("﻿"))
+        return json.dumps(_redact_json_value(parsed), indent=2, ensure_ascii=False)
+    except (ValueError, RecursionError):
+        return "content withheld: unparseable JSON"
 
 
 def read_file(path: str, root: str = None) -> dict:
@@ -1018,14 +961,18 @@ def read_file(path: str, root: str = None) -> dict:
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
             size = os.fstat(f.fileno()).st_size
             if is_cred:
+                name = os.path.basename(os.path.realpath(abs_path))
+                if not _is_credential_file(name):
+                    name = os.path.basename(abs_path)
                 if size > CREDENTIAL_READ_LIMIT:
                     content = "content withheld: too large"
+                elif not name.lower().endswith(".json"):
+                    # shortcut: no .env parsing at all (dotenv dialects disagree on quoting and
+                    # escapes, so any line-level masking leaks); the file is not even read.
+                    content = _ENV_WITHHELD
                 else:
                     # No FILE_READ_LIMIT truncation: JSON must be complete to be masked.
-                    name = os.path.basename(os.path.realpath(abs_path))
-                    if not _is_credential_file(name):
-                        name = os.path.basename(abs_path)
-                    content = _redact_credential_text(name, f.read())
+                    content = _redact_json_text(f.read())
                 return {"redacted": True, "content": content, "size_bytes": size, "note": _CREDENTIAL_NOTE}
             if size <= FILE_READ_LIMIT:
                 return {"content": f.read(), "size_bytes": size}
