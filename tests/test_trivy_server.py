@@ -534,7 +534,7 @@ def test_read_file_redacts_gemini_env(tmp_path):
 
 def test_read_file_redacts_env_local_with_pem_continuation(tmp_path):
     f = tmp_path / ".env.local"
-    f.write_text("KEY=v\r\nMIIEvgIBADANBgkq==\n  # keep\nnot a pair\n")
+    f.write_text("KEY=v\r\nMIIEvg+IBADANBgkq==\n  # keep\nnot a pair\n")
     result = read_file(str(f), root=str(tmp_path))
     assert "MIIEvg" not in result["content"]
     assert result["content"].split("\n") == [
@@ -585,20 +585,42 @@ def test_read_file_env_unterminated_quote_redacts_rest(tmp_path):
     assert result["content"] == "A=<redacted>\n<redacted line>\n<redacted line>"
 
 
-def test_read_file_broken_json_multiline_quoted_value(tmp_path):
-    f = tmp_path / "auth.json"
-    f.write_text('KEY="start\nU0VDUkVUVkFMVUU=\n# SECRET_VALUE"\n')
+def test_read_file_env_long_key_multiline_quoted_value(tmp_path):
+    # Key longer than 64 chars (and not a valid key shape for the next line) must still
+    # open quote tracking, including "#" lines inside the value.
+    f = tmp_path / ".env"
+    long_key = "K" * 70
+    f.write_text(f'{long_key}="start\n# TOP_SECRET\nmore_SECRET2"\nNEXT=1\n')
     result = read_file(str(f), root=str(tmp_path))
-    assert "U0VDUkVU" not in result["content"] and "SECRET_VALUE" not in result["content"]
+    assert "TOP_SECRET" not in result["content"] and "SECRET2" not in result["content"]
+    assert result["content"].split("\n") == [
+        f"{long_key}=<redacted>", "<redacted line>", "<redacted line>", "NEXT=<redacted>"]
 
 
-def test_read_file_broken_json_falls_back_to_lines(tmp_path):
+def test_read_file_env_non_key_line_opens_quote(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text('not a key = "open\n# TOP_SECRET\nclose"\nA=1\n')
+    result = read_file(str(f), root=str(tmp_path))
+    assert "TOP_SECRET" not in result["content"]
+    assert result["content"].split("\n") == [
+        "<redacted line>", "<redacted line>", "<redacted line>", "A=<redacted>"]
+
+
+def test_read_file_broken_json_withheld(tmp_path):
     f = tmp_path / "auth.json"
     f.write_text('{\n  "token": "SECRETVALUE",\n  oops\n')
     result = read_file(str(f), root=str(tmp_path))
     assert result["redacted"] is True
-    assert "SECRETVALUE" not in result["content"]
-    assert "<redacted line>" in result["content"]
+    assert result["content"] == "content withheld: unparseable JSON"
+    assert result["size_bytes"] == f.stat().st_size
+
+
+def test_read_file_broken_json_multiline_string_withheld(tmp_path):
+    f = tmp_path / "auth.json"
+    f.write_text('"start\n# TOP_SECRET\nend"\nKEY="a\nU0VDUkVU"\n')
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["content"] == "content withheld: unparseable JSON"
+    assert "TOP_SECRET" not in result["content"]
 
 
 def test_read_file_redacts_json_bom_and_list_root(tmp_path):

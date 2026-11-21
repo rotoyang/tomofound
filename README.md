@@ -355,7 +355,7 @@ Python sources additionally get **AST analysis** (catches `eval` / `exec` / `pic
 
 Trivy is auto-installed to `~/.tomofound/tools/trivy` on first scan if it isn't already on `PATH`.
 
-**Credential files are never handed to the LLM verbatim.** The `read_file` tool masks `oauth_creds.json`, `credentials.json`, `auth.json`, `.env` and `*.env` / `.env.*` files: JSON keeps its keys and structure with every string/number value replaced by `<redacted:N chars>`, and `.env`-style (or unparsable) files come back as `KEY=<redacted>` lines. Secret detection on those files is done server-side by Trivy, which reads them without returning their contents.
+**Credential files are never handed to the LLM verbatim.** The `read_file` tool masks `oauth_creds.json`, `credentials.json`, `auth.json`, `.env` and `*.env` / `.env.*` files: JSON keeps its keys and structure with every string/number value replaced by `<redacted:N chars>`, `.env`-style files come back as `KEY=<redacted>` lines (quoted multi-line values are fully withheld), and a credential `.json` that fails to parse is withheld entirely (`content withheld: unparseable JSON`). Secret detection on those files is done server-side by Trivy, which reads them without returning their contents.
 
 ## Risk score
 

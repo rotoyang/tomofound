@@ -955,32 +955,28 @@ def _redact_lines(text: str) -> str:
         if not stripped or stripped.startswith("#"):
             out.append(line)
             continue
+        # Quote tracking is independent of key shape: any line whose text after the first
+        # "=" opens a quote without closing it starts a multi-line value.
+        value = line.partition("=")[2].lstrip()
+        if value[:1] in ('"', "'") and not _closes_quote(value[1:], value[0]):
+            open_quote = value[0]
         m = _ENV_KEY_RE.match(line)
-        # Strict key regex plus two guards: a base64/PEM continuation line such as
-        # "MIIEvg...kq==" also matches KEY= and would leak as a "key". Reject names
-        # longer than 64 chars and lines whose remainder is only "=" padding.
-        # shortcut: an unquoted multi-line value (no quotes) cannot be told apart from
-        # new KEY= lines; a short alnum continuation ending in "=" still reads as KEY=.
-        # Dotenv-style quoting is the supported multi-line form.
-        if m and len(m.group(1)) <= 64 and set(line[m.end():].strip()) != {"="}:
-            out.append(f"{m.group(1)}=<redacted>")
-            value = line[m.end():].lstrip()
-            if value[:1] in ('"', "'") and not _closes_quote(value[1:], value[0]):
-                open_quote = value[0]
-        else:
-            out.append("<redacted line>")
+        # shortcut: an unquoted multi-line value cannot be told apart from new KEY= lines;
+        # an alnum-only continuation ending in "=" reads as KEY=. Dotenv-style quoting is
+        # the supported multi-line form.
+        out.append(f"{m.group(1)}=<redacted>" if m else "<redacted line>")
     return "\n".join(out)
 
 
 def _redact_credential_text(name: str, text: str) -> str:
-    # shortcut: .env-style files are never parsed as JSON; a JSON-named file that
-    # fails to parse falls back to line mode (quoted multi-line values are tracked there too).
+    # A .json credential file that fails to parse is withheld entirely: line-mode masking
+    # cannot be trusted on arbitrary broken JSON (strings may span lines).
     if name.lower().endswith(".json"):
         try:
             parsed = json.loads(text.lstrip("﻿"))
             return json.dumps(_redact_json_value(parsed), indent=2, ensure_ascii=False)
         except (ValueError, RecursionError):
-            pass
+            return "content withheld: unparseable JSON"
     return _redact_lines(text)
 
 
