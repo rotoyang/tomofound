@@ -238,10 +238,23 @@ def test_plugin_network_hosts_are_bare_hostnames():
 
 def test_plugin_network_hosts_cover_known_server_endpoints():
     # Every host the server code (trivy_server.py, atr_catalog.py) and the README
-    # outbound table name. Dropping one would make the declared allowlist too
-    # narrow for a feature that is documented to work.
+    # outbound table name. network.hosts is a disclosure list (Claude Code does not
+    # enforce it), so dropping one would make the disclosure incomplete.
     hosts = set(load_json(PLUGIN_JSON)["network"]["hosts"])
     assert {"github.com", "api.github.com", "raw.githubusercontent.com", "api.osv.dev", "pypi.org"} <= hosts
+
+
+def test_plugin_network_hosts_disclose_redirect_and_trivy_registry_hosts():
+    # Redirect destinations of the GitHub downloads (ATR tarball -> codeload,
+    # Trivy release -> release-assets) and the OCI registries Trivy itself pulls
+    # its vulnerability DB / Java DB / checks bundle from (trivy fs --help defaults).
+    hosts = set(load_json(PLUGIN_JSON)["network"]["hosts"])
+    assert {
+        "codeload.github.com",
+        "release-assets.githubusercontent.com",
+        "mirror.gcr.io",
+        "ghcr.io",
+    } <= hosts
 
 
 @pytest.mark.parametrize("hosts", [

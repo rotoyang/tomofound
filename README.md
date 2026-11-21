@@ -381,6 +381,11 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v3.5.11/LICENSE` | Re-verify ATR upstream license before trusting a catalog refresh | The `atr_update` MCP tool |
 | `https://github.com/Agent-Threat-Rule/agent-threat-rules/archive/refs/tags/v3.5.11.tar.gz` | Download the pinned ATR source tarball | The `atr_update` MCP tool — user-initiated only, never auto-run |
 | `https://api.github.com/repos/Agent-Threat-Rule/agent-threat-rules/releases/latest` | Report whether a newer ATR release exists than our pin (never downloads) | The `catalogs_status` MCP tool — only when called with `check_upstream: true`; local-only by default |
+| `codeload.github.com` | 302 redirect destination of the ATR tarball download (`github.com/.../archive/refs/tags/<tag>.tar.gz`) | The `atr_update` MCP tool (and the `--ensure-tools` hook), via the GitHub redirect |
+| `release-assets.githubusercontent.com` | 302 redirect destination of the Trivy release download (`github.com/aquasecurity/trivy/releases/download/...`) | The Trivy download (first scan or the `--ensure-tools` hook), via the GitHub redirect; the binary is still checked against the published sha256 |
+| `mirror.gcr.io`, `ghcr.io` | Trivy's default OCI registries for its vulnerability DB, Java DB and checks bundle (`--db-repository`, `--java-db-repository`, `--checks-bundle-repository` defaults) | Connected to by the **Trivy subprocess** during a scan, not by tomofound's own code |
+
+`network.hosts` in `.claude-plugin/plugin.json` discloses all of the hosts above for the plugin. It is informational: Claude Code does not use it to allow or block connections.
 
 ### Repository assets
 
@@ -393,7 +398,7 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `integrations/codex/skills/security-scan/SKILL.md` | This repo | Codex-side wrapper around the same MCP tools |
 | `integrations/gemini/skills/security-scan/SKILL.md` | This repo | Gemini CLI-side wrapper around the same MCP tools |
 | `setup.sh` | This repo | One-shot installer |
-| `.claude-plugin/plugin.json` | This repo | Claude Code plugin manifest (name, version, author, MIT license, `network.hosts`). `version` must equal `setup.sh`'s `TOMOFOUND_REF` minus the `v`. `network.hosts` declares the hosts above (`github.com`, `api.github.com`, `raw.githubusercontent.com`, `api.osv.dev`, `pypi.org`, `files.pythonhosted.org`); add a host there whenever a new outbound URL is added |
+| `.claude-plugin/plugin.json` | This repo | Claude Code plugin manifest (name, version, author, MIT license, `network.hosts`). `version` must equal `setup.sh`'s `TOMOFOUND_REF` minus the `v`. `network.hosts` is a disclosure list of the hosts in the outbound table (`github.com`, `api.github.com`, `raw.githubusercontent.com`, `codeload.github.com`, `release-assets.githubusercontent.com`, `api.osv.dev`, `pypi.org`, `files.pythonhosted.org`, `mirror.gcr.io`, `ghcr.io`); Claude Code does not enforce it (it neither allows nor blocks any host). Add a host there whenever a new outbound URL is added |
 | `.claude-plugin/marketplace.json` | This repo | Single-plugin marketplace; the plugin `source` is this repo at the `TOMOFOUND_REF` tag, never `main` |
 | `.mcp.json` | This repo | Plugin MCP registration: `python3 ${CLAUDE_PLUGIN_ROOT}/server/trivy_server.py` |
 | `hooks/hooks.json` | This repo | Plugin `SessionStart` hook: `trivy_server.py --ensure-tools`, async, 600 s timeout |
