@@ -28,11 +28,11 @@ tomofound is **install once, then use it from Claude, Codex, or Gemini CLI**. In
 
 ## Requirements
 
-- macOS
+- macOS. **Windows is not supported yet** (the repo has no `setup.ps1`, and `setup.sh` only runs on macOS).
 - [Claude desktop app](https://claude.ai/download) (for Claude usage)
 - Codex (for Codex usage)
 - [Gemini CLI](https://github.com/google-gemini/gemini-cli) (for Gemini CLI usage)
-- Python 3 (preinstalled on macOS)
+- **Python 3.10 or newer** as `python3` on `PATH` (the `mcp` 1.30.0 SDK requires 3.10+). Both `setup.sh` and the Claude Code plugin need it; the plugin runs `python3` directly. On macOS, `python3` may be Apple's Command Line Tools stub: without Command Line Tools it opens an install prompt, and Apple's bundled Python is older than 3.10. Install Python 3.10+ (from [python.org](https://www.python.org/downloads/) or Homebrew) and check with `python3 --version`.
 - `git` on PATH (only needed when you pass a `https://github.com/...` URL)
 
 ## Installation (one-time)
@@ -59,9 +59,16 @@ Inside Claude Code:
 
 Then run the skill as **`/tomofound:security-scan`** (plugin skills are namespaced by plugin name). The plugin registers the `tomofound` MCP server itself — there is no `claude_desktop_config.json` edit and no drag-and-drop skill step.
 
-A `SessionStart` hook runs `trivy_server.py --ensure-tools` in the background (async, 600-second limit). It is a no-op once the ATR catalog and Trivy are in place; otherwise it fetches them so your first scan is a scan, not a download. It never blocks Claude Code from starting, and it writes to `~/.tomofound/` exactly as the installer does — the plugin does **not** move data into Claude Code's plugin data directory.
+A `SessionStart` hook runs `trivy_server.py --ensure-tools` in the background (async, 600-second limit). It is a no-op once the venv dependencies, the pinned ATR catalog and Trivy are all in place. Otherwise it fills in what is missing, so your first scan is a scan, not a download:
+
+- **Trivy** is downloaded only if it is neither on `PATH` nor already in `~/.tomofound/tools/`.
+- **The ATR catalog** is downloaded only when the cached catalog is not the pinned version: it is missing, or it was left over from before a tomofound upgrade changed the pin. The hook never fetches `latest`, and a catalog already at the pin is left alone.
+
+Each ATR download first re-verifies that the upstream LICENSE is still MIT, the same check `atr_update` makes. The hook never blocks Claude Code from starting, and it writes to `~/.tomofound/` exactly as the installer does — the plugin does **not** move data into Claude Code's plugin data directory.
 
 The plugin is pinned the same way as the installer: the marketplace points at a release tag, never at `main`, so nothing merged to `main` reaches `/plugin install` until a release says so.
+
+**Prerequisites:** the plugin starts its MCP server and the `SessionStart` hook with `python3` from `PATH`, so the `python3` that a new shell finds must be Python 3.10+ (see [Requirements](#requirements)). If it is missing or too old, the server will not start. Windows is **not supported yet**.
 
 #### Moving from `setup.sh` to the plugin (Claude Code)
 
@@ -129,7 +136,7 @@ Restart Gemini CLI or open a new session. The `security-scan` skill is installed
 
 1. Copies the MCP server (`trivy_server.py`) and the scan-rule prompt (`SKILL.md`, plus a `security-scan.md` compatibility copy for older servers) into `~/.tomofound/`
 2. Builds the Python virtualenv at `~/.tomofound/venv/` and installs the pinned dependencies
-3. Downloads the pinned ATR rule catalog (~59 MB) into `~/.tomofound/catalogs/atr/`
+3. Downloads the pinned ATR rule catalog (~59 MB) into `~/.tomofound/catalogs/atr/`, re-verifying the upstream MIT LICENSE first. This runs on **every** installer run, not just the first, and replaces the cached catalog with the pinned version (skipped with `--no-downloads`; if the download fails, the previous cache is kept)
 4. Downloads and SHA-256-verifies the pinned Trivy binary (~48 MB archive) into `~/.tomofound/tools/`
 5. Registers the `tomofound` MCP server in `~/Library/Application Support/Claude/claude_desktop_config.json`
 6. Installs the Codex skill wrapper into `~/.codex/skills/security-scan/SKILL.md`
@@ -144,20 +151,20 @@ After this, you can forget about installation — just use `/security-scan` in C
 
 ### Updating
 
-Three things update on **different schedules**, and the installer only handles the first. Skipping the other two is the most common reason a scan silently runs old code or old rules.
+Three things update on **different schedules**. Re-running the installer covers the first, and re-fetches the ATR catalog at its pinned version; the skill registered inside Claude Desktop is a copy you refresh by hand. Missing one is the most common reason a scan silently runs old code or old rules.
 
 | What | How it updates | Automatic? |
 |---|---|---|
 | tomofound itself (server, prompt source, MCP registration) | re-run the installer | yes, on re-run |
 | The skill **registered inside Claude Desktop** | re-add it by hand — see below | **no** |
-| The ATR rule catalog | `atr_update` from your assistant | **no, never** |
+| The ATR rule catalog | re-run the installer, the plugin's SessionStart hook, or `atr_update` from your assistant — always the **pinned** version | **Only to the pinned version**: on every installer run, and at SessionStart when the cached catalog is not the pin. Never `latest` |
 
 #### 1. tomofound itself
 
 Re-run the same `curl | bash` command. Installation is **idempotent** — re-running is always safe. At the start the installer prints a summary of what it found at `~/.tomofound/` and what it will touch:
 
-- **Refreshed:** server Python modules, the security-scan prompt **at `~/.tomofound/skills/`**, the MCP-server registration in Claude / Codex configs.
-- **Preserved:** the venv (its `_DEPS_VERSION` marker auto-refreshes deps on the next server start if anything changed), cached ATR catalogs, the Trivy binary, and your historical scan reports under `~/.tomofound/reports/`.
+- **Refreshed:** server Python modules, the security-scan prompt **at `~/.tomofound/skills/`**, the MCP-server registration in Claude / Codex configs, and the ATR catalog, re-fetched at the pinned version (unless `--no-downloads`).
+- **Preserved:** the venv (its `_DEPS_VERSION` marker auto-refreshes deps on the next server start if anything changed), the Trivy binary, and your historical scan reports under `~/.tomofound/reports/`.
 - **Reported as orphans:** any `*.py` in `~/.tomofound/server/` that this version no longer ships. The installer doesn't delete them — you decide.
 
 #### 2. Updating the skill inside Claude Desktop (manual)
@@ -174,17 +181,21 @@ Codex and Gemini CLI read their skill files from disk each session, so for those
 
 If you only need the checklist and not the slash command, `/tomofound__security_scan` comes from the MCP server directly and is always at the installed version, no re-registration involved.
 
-#### 3. Updating the ATR rule catalog (manual, on purpose)
+#### 3. Updating the ATR rule catalog
 
-The catalog is **never** fetched automatically. It is the one part of tomofound that reaches the network on your behalf during normal use, so it only moves when you ask:
+The catalog only ever moves to the **pinned** ATR release, never to `latest`. It is downloaded in three situations:
+
+- **Installer runs** (`setup.sh`): every run, unless you pass `--no-downloads`. The installer re-fetches the pinned catalog even when the cache already matches.
+- **Plugin `SessionStart` hook** (Claude Code plugin): only when the cached catalog is not the pinned version, for example after a tomofound upgrade changed the pin. If the cache already matches, the hook leaves it alone.
+- **On request**, with `atr_update`:
 
 ```
 Call the atr_update MCP tool          (or just ask: "run atr_update")
 ```
 
-Ask your assistant to run it, or invoke the tool directly. It downloads the pinned ATR release, re-verifies the upstream LICENSE is still MIT before trusting the tarball, and re-parses every rule into `~/.tomofound/catalogs/atr/`.
+Ask your assistant to run it, or invoke the tool directly. It downloads the pinned ATR release, re-verifies the upstream LICENSE is still MIT before trusting the tarball, and re-parses every rule into `~/.tomofound/catalogs/atr/`. Every download path makes the same LICENSE check.
 
-**Re-running the installer does not do this.** Upgrading tomofound changes which ATR version is *pinned*; it does not touch the catalog already on disk. Until you run `atr_update`, scans keep matching the rules you downloaded last time — potentially many releases and hundreds of rules behind.
+**Upgrading tomofound does not refresh the catalog by itself.** An upgrade changes which ATR version is *pinned*; the catalog on disk stays put until the next installer run, the next Claude Code session (if you use the plugin), or an `atr_update`. Until then, scans keep matching the rules you downloaded last time — potentially many releases and hundreds of rules behind.
 
 The report header calls this out rather than showing a green tick for a stale catalog:
 
@@ -237,7 +248,7 @@ Trivy is optional throughout. Without it you lose the CVE and secret passes; ATR
 ### "No findings" but expected results
 
 - Check the ATR catalog is installed by invoking the `atr_status` tool — if the catalog is missing, run `atr_update` first.
-- **Check it isn't stale.** `atr_status` reports the cached version; if it differs from the pinned one the header shows `STALE` and the scan is matching whatever you downloaded last time. Run `atr_update`. See [Updating](#3-updating-the-atr-rule-catalog-manual-on-purpose).
+- **Check it isn't stale.** `atr_status` reports the cached version; if it differs from the pinned one the header shows `STALE` and the scan is matching whatever you downloaded last time. Run `atr_update`. See [Updating](#3-updating-the-atr-rule-catalog).
 - Verify the target path exists and contains scannable files by running the `discover_targets` tool.
 - Ensure extensions are installed in their standard locations (`~/.claude/`, `~/.codex/`, `~/.gemini/`).
 
@@ -246,7 +257,7 @@ Trivy is optional throughout. Without it you lose the CVE and secret passes; ATR
 Three things update separately — see [Updating](#updating). In order of how often it catches people:
 
 - **The skill in Claude Desktop keeps its own copy.** Re-running the installer refreshes `~/.tomofound/skills/` but not what Claude runs. Remove and re-add the skill under **Settings → Customize → Skills**, then Cmd-Q and reopen. Codex and Gemini CLI don't have this problem — they read from disk each session.
-- **The ATR catalog never auto-updates.** A new tomofound version changes which ATR release is *pinned*; the rules on disk stay put until you run `atr_update`.
+- **The ATR catalog moves only to the pinned release.** A new tomofound version changes which ATR release is *pinned*. Re-run the installer, start a new Claude Code session if you use the plugin, or run `atr_update` to pick it up. Until one of those happens, the rules on disk stay put and the report flags the catalog as STALE.
 - **Trivy is reused once installed.** A binary already on `PATH` or in `~/.tomofound/tools/` is used as-is even if this build pins a newer one. The report flags it; delete the binary to let tomofound install the pinned build.
 
 ### `/security-scan` says "unknown skill"
@@ -255,7 +266,7 @@ The registered skill predates the fix that aligned its declared name with its di
 
 ### setup.sh errors
 
-- **"Not macOS"**: tomofound currently supports macOS only; Linux support is planned.
+- **"Not macOS"**: tomofound currently supports macOS only. Windows is **not supported yet** (the repo has no `setup.ps1`), and Linux support is planned.
 - **Permission denied**: check ownership of `~/.tomofound/` (`ls -la ~/.tomofound`).
 - For a clean slate, re-run setup.sh with `--clean` to wipe and recreate the installation directory.
 
@@ -394,8 +405,8 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | Python `PyYAML` | `>=6.0,<7` | [MIT](https://github.com/yaml/pyyaml/blob/main/LICENSE) | https://pypi.org/project/PyYAML/ | Installed alongside `mcp` by `_bootstrap()`. Parses the Agent Threat Rules YAML catalog. |
 | Trivy CLI | `0.76.2` (pinned in `server/trivy_server.py:_TRIVY_PIN`) | [Apache-2.0](https://github.com/aquasecurity/trivy/blob/main/LICENSE) | https://github.com/aquasecurity/trivy | Downloaded on first scan from the pinned release tag, verified against Trivy's published sha256 checksums, then cached at `~/.tomofound/tools/trivy`. **Deliberately pinned, not floating-latest**: Trivy's March 2026 supply-chain incident shipped a malicious release with matching checksums — a floating `releases/latest` install cannot survive that attack. Bumping the pin is an explicit, reviewed change. Trivy's CVE *database* still auto-updates independently of the binary version. |
 | OSV vulnerability API | API v1 (live) | [Apache-2.0](https://github.com/google/osv.dev/blob/master/LICENSE) (engine); upstream advisory licenses for individual entries | https://osv.dev | Queried by the `check_osv` MCP tool as a fallback when Trivy has no dependency manifest. Findings cite the OSV advisory ID. |
-| Agent Threat Rules (ATR) catalog | `v4.3.1` (pinned in `server/atr_catalog.py:ATR_PIN`) | [MIT](https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/v4.3.1/LICENSE) (SPDX `MIT`; verified at the `v4.3.1` tag: LICENSE sha256 `aaf963e7…c92598`, byte-identical to the previous pin's LICENSE, covers the engine and the `rules/` data we read, no other LICENSE/COPYING file under `rules/`) | https://github.com/Agent-Threat-Rule/agent-threat-rules | Source tarball (~59 MB) downloaded by the user-initiated `atr_update` MCP tool, then cached at `~/.tomofound/catalogs/atr/` (rules + LICENSE retained per MIT). Never auto-updated; `atr_update` re-verifies the upstream LICENSE is still MIT before trusting a new tarball, and flags (without refusing) a LICENSE whose hash differs from the reviewed one. We use ATR as a regex pre-filter — findings cite rule IDs (`ATR-YYYY-NNNNN`) and upstream references (OWASP Agentic / MITRE ATLAS / CVE). |
-| host Python 3 | `≥3.9` | [PSF License](https://docs.python.org/3/license.html) | macOS system | Required for the bootstrap venv. Preinstalled on macOS. |
+| Agent Threat Rules (ATR) catalog | `v4.3.1` (pinned in `server/atr_catalog.py:ATR_PIN`) | [MIT](https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/v4.3.1/LICENSE) (SPDX `MIT`; verified at the `v4.3.1` tag: LICENSE sha256 `aaf963e7…c92598`, byte-identical to the previous pin's LICENSE, covers the engine and the `rules/` data we read, no other LICENSE/COPYING file under `rules/`) | https://github.com/Agent-Threat-Rule/agent-threat-rules | Source tarball (~59 MB) downloaded at the pinned tag by `setup.sh` on every run (unless `--no-downloads`), by the plugin's SessionStart hook when the cached catalog is not the pinned version, and by the user-initiated `atr_update` MCP tool; cached at `~/.tomofound/catalogs/atr/` (rules + LICENSE retained per MIT). Never fetches `latest`. Every download re-verifies the upstream LICENSE is still MIT before trusting the tarball, and flags (without refusing) a LICENSE whose hash differs from the reviewed one. We use ATR as a regex pre-filter — findings cite rule IDs (`ATR-YYYY-NNNNN`) and upstream references (OWASP Agentic / MITRE ATLAS / CVE). |
+| host Python 3 | `≥3.10` | [PSF License](https://docs.python.org/3/license.html) | macOS system or your own Python install | Required for the bootstrap venv and the server: `mcp` 1.30.0 needs 3.10+, and the server uses `X \| None` annotations at runtime. On macOS, `python3` is a Command Line Tools stub (it prompts for install when the tools are missing), and Apple's bundled Python is older than 3.10, so install a newer Python. |
 | host `git` | any recent | [GPL-2.0](https://git-scm.com/about/free-and-open-source) | macOS system | Required only when scanning a `https://github.com/...` URL via `clone_repo`. Used as a CLI subprocess; we do not link git as a library. |
 | Python stdlib | ships with host Python | [PSF License](https://docs.python.org/3/license.html) | https://docs.python.org/3/library/ | `ast`, `ipaddress`, `socket`, `subprocess`, `tarfile`, `tempfile`, `urllib`, `zipfile`, etc. |
 
@@ -410,11 +421,11 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 | `https://<host>/<path>.zip` | Download a `.zip` for pre-install scan | The `extract_zip` MCP tool — **https only**, refuses private / loopback / link-local / cloud-metadata hosts, re-validates every redirect target |
 | `https://raw.githubusercontent.com/rotoyang/tomofound/<release tag>/...` | Installer fetches the server + skill at the pinned tag (`TOMOFOUND_REF`, default the current release; a missing tag fails loudly rather than falling back to `main`) | `setup.sh` only |
 | `https://github.com/rotoyang/tomofound` at the release tag (`ref` in `.claude-plugin/marketplace.json`) | Claude Code clones the plugin at the pinned tag | The user's `/plugin marketplace add` / `/plugin install` — performed by Claude Code, not by tomofound code |
-| The ATR and Trivy URLs above | Same downloads as the installer, run in the background at session start | The plugin's `SessionStart` hook (`--ensure-tools`) — a no-op once both are in place |
-| `https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v4.3.1/LICENSE` | Re-verify ATR upstream license before trusting a catalog refresh | The `atr_update` MCP tool |
-| `https://github.com/Agent-Threat-Rule/agent-threat-rules/archive/refs/tags/v4.3.1.tar.gz` | Download the pinned ATR source tarball | The `atr_update` MCP tool — user-initiated only, never auto-run |
+| The Trivy URLs above, and the ATR URLs in the two rows below | Same downloads as the installer, run in the background at session start | The plugin's `SessionStart` hook (`--ensure-tools`): Trivy when it is missing, ATR only when the cached catalog is not the pinned version. A no-op once both are in place |
+| `https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v4.3.1/LICENSE` | Re-verify ATR upstream license before trusting a catalog refresh | Every ATR catalog download: `setup.sh`, the `--ensure-tools` hook (only when the cached catalog is not the pinned version), and the `atr_update` MCP tool |
+| `https://github.com/Agent-Threat-Rule/agent-threat-rules/archive/refs/tags/v4.3.1.tar.gz` | Download the pinned ATR source tarball | `setup.sh` (every run, unless `--no-downloads`), the `--ensure-tools` hook (only when the cached catalog is not the pinned version), and the `atr_update` MCP tool (on request) |
 | `https://api.github.com/repos/Agent-Threat-Rule/agent-threat-rules/releases/latest` | Report whether a newer ATR release exists than our pin (never downloads) | The `catalogs_status` MCP tool — only when called with `check_upstream: true`; local-only by default |
-| `codeload.github.com` | 302 redirect destination of the ATR tarball download (`github.com/.../archive/refs/tags/<tag>.tar.gz`) | The `atr_update` MCP tool (and the `--ensure-tools` hook), via the GitHub redirect |
+| `codeload.github.com` | 302 redirect destination of the ATR tarball download (`github.com/.../archive/refs/tags/<tag>.tar.gz`) | `setup.sh`, the `--ensure-tools` hook and the `atr_update` MCP tool, via the GitHub redirect |
 | `release-assets.githubusercontent.com` | 302 redirect destination of the Trivy release download (`github.com/aquasecurity/trivy/releases/download/...`) | The Trivy download (first scan or the `--ensure-tools` hook), via the GitHub redirect; the binary is still checked against the published sha256 |
 | `mirror.gcr.io`, `ghcr.io` | Trivy's default OCI registries for its vulnerability DB, Java DB and checks bundle (`--db-repository`, `--java-db-repository`, `--checks-bundle-repository` defaults) | Connected to by the **Trivy subprocess** during a scan, not by tomofound's own code |
 
