@@ -541,6 +541,57 @@ def test_read_file_redacts_env_local_with_pem_continuation(tmp_path):
         "KEY=<redacted>", "<redacted line>", "  # keep", "<redacted line>"]
 
 
+def test_read_file_env_multiline_double_quoted_pem(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text(
+        'PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n'
+        "U0VDUkVUVkFMVUU=\n"
+        "QUJDREVGR0g==\n"
+        "# SECRET_VALUE\n"
+        "-----END PRIVATE KEY-----\"\n"
+        "NEXT=after\n"
+    )
+    result = read_file(str(f), root=str(tmp_path))
+    content = result["content"]
+    for fragment in ("BEGIN", "U0VDUkVU", "QUJDREVG", "SECRET_VALUE", "END PRIVATE", "after"):
+        assert fragment not in content
+    assert content.split("\n") == [
+        "PRIVATE_KEY=<redacted>", "<redacted line>", "<redacted line>",
+        "<redacted line>", "<redacted line>", "NEXT=<redacted>"]
+
+
+def test_read_file_env_multiline_single_quoted(tmp_path):
+    f = tmp_path / ".env.local"
+    f.write_text("CERT='line1SECRET=\n# hidden=comment\n\nKEY2=leak'\nOK=1\n")
+    result = read_file(str(f), root=str(tmp_path))
+    content = result["content"]
+    for fragment in ("line1SECRET", "hidden", "KEY2", "leak"):
+        assert fragment not in content
+    assert content.split("\n") == [
+        "CERT=<redacted>", "<redacted line>", "", "<redacted line>", "OK=<redacted>"]
+
+
+def test_read_file_env_single_line_quoted_does_not_open_block(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text('A="one"\n# comment kept\nB=\'two\'\n')
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["content"] == "A=<redacted>\n# comment kept\nB=<redacted>"
+
+
+def test_read_file_env_unterminated_quote_redacts_rest(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text('A="never closed\nB=secretB\n# secretC\n')
+    result = read_file(str(f), root=str(tmp_path))
+    assert result["content"] == "A=<redacted>\n<redacted line>\n<redacted line>"
+
+
+def test_read_file_broken_json_multiline_quoted_value(tmp_path):
+    f = tmp_path / "auth.json"
+    f.write_text('KEY="start\nU0VDUkVUVkFMVUU=\n# SECRET_VALUE"\n')
+    result = read_file(str(f), root=str(tmp_path))
+    assert "U0VDUkVU" not in result["content"] and "SECRET_VALUE" not in result["content"]
+
+
 def test_read_file_broken_json_falls_back_to_lines(tmp_path):
     f = tmp_path / "auth.json"
     f.write_text('{\n  "token": "SECRETVALUE",\n  oops\n')

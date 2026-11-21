@@ -934,10 +934,24 @@ def _redact_json_value(value):
     return "<redacted>"
 
 
+def _closes_quote(text: str, quote: str) -> bool:
+    """True if text contains an unescaped `quote` character."""
+    return re.search(r"(?<!\\)" + re.escape(quote), text) is not None
+
+
 def _redact_lines(text: str) -> str:
     out = []
+    open_quote = None  # quote char of a multi-line value we are inside, else None
     for line in text.splitlines():
         stripped = line.strip()
+        if open_quote:
+            # Inside a quoted multi-line value (e.g. a PEM key): every non-blank line,
+            # including "#" lines and base64 "==" lines, is value content. Blank lines
+            # carry nothing, so they pass through.
+            out.append(line if not stripped else "<redacted line>")
+            if _closes_quote(line, open_quote):
+                open_quote = None
+            continue
         if not stripped or stripped.startswith("#"):
             out.append(line)
             continue
@@ -945,10 +959,14 @@ def _redact_lines(text: str) -> str:
         # Strict key regex plus two guards: a base64/PEM continuation line such as
         # "MIIEvg...kq==" also matches KEY= and would leak as a "key". Reject names
         # longer than 64 chars and lines whose remainder is only "=" padding.
-        # shortcut: a short alnum line ending in a single "=" still reads as KEY=;
-        # upgrade to PEM-block tracking if that leak matters.
+        # shortcut: an unquoted multi-line value (no quotes) cannot be told apart from
+        # new KEY= lines; a short alnum continuation ending in "=" still reads as KEY=.
+        # Dotenv-style quoting is the supported multi-line form.
         if m and len(m.group(1)) <= 64 and set(line[m.end():].strip()) != {"="}:
             out.append(f"{m.group(1)}=<redacted>")
+            value = line[m.end():].lstrip()
+            if value[:1] in ('"', "'") and not _closes_quote(value[1:], value[0]):
+                open_quote = value[0]
         else:
             out.append("<redacted line>")
     return "\n".join(out)
@@ -956,7 +974,7 @@ def _redact_lines(text: str) -> str:
 
 def _redact_credential_text(name: str, text: str) -> str:
     # shortcut: .env-style files are never parsed as JSON; a JSON-named file that
-    # fails to parse falls back to line mode. Upgrade if quoted multi-line .env values matter.
+    # fails to parse falls back to line mode (quoted multi-line values are tracked there too).
     if name.lower().endswith(".json"):
         try:
             parsed = json.loads(text.lstrip("﻿"))
