@@ -611,8 +611,9 @@ def test_read_file_env_output_is_only_key_lines(tmp_path):
     for fragment in ("TOP_SECRET", "SECRET_FRAGMENT", "abc123"):
         assert fragment not in result["content"]
     lines = result["content"].split("\n")
-    assert lines == [f"{long_key}=<redacted>", "B=<redacted>", "C=<redacted>", "D=<redacted>"]
-    assert all(line.endswith("=<redacted>") for line in lines)
+    # Names over 64 chars are not echoed, but their quoted values are still skipped.
+    assert lines == ["B=<redacted>", "C=<redacted>", "D=<redacted>"]
+    assert long_key not in result["content"]
 
 
 def test_read_file_env_long_key_multiline_quoted_value(tmp_path):
@@ -623,7 +624,28 @@ def test_read_file_env_long_key_multiline_quoted_value(tmp_path):
     f.write_text(f'{long_key}="start\n# TOP_SECRET\nmore_SECRET2"\nNEXT=1\n')
     result = read_file(str(f), root=str(tmp_path))
     assert "TOP_SECRET" not in result["content"] and "SECRET2" not in result["content"]
-    assert result["content"].split("\n") == [f"{long_key}=<redacted>", "NEXT=<redacted>"]
+    assert result["content"].split("\n") == ["NEXT=<redacted>"]
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # Even backslash run before the quote: the quote closes the value.
+        ('A="C:\\\\"\nTOKEN="start\nSECRET_FRAGMENT=\nend"\nNEXT=1\n', ["A", "TOKEN", "NEXT"]),
+        # Odd run (\\\"): the quote is escaped, the value continues to the final quote.
+        ('A="x\\\\\\"y\nSECRET_FRAGMENT=\nz"\nNEXT=1\n', ["A", "NEXT"]),
+        # Single quotes do not process escapes: 'C:\' closes, next value is multi-line.
+        ("A='C:\\'\nTOKEN='start\nSECRET_FRAGMENT=\nend'\nNEXT=1\n", ["A", "TOKEN", "NEXT"]),
+        # Backtick quotes escape like double quotes.
+        ("A=`x\\``\nTOKEN=`s\nSECRET_FRAGMENT=\ne`\nNEXT=1\n", ["A", "TOKEN", "NEXT"]),
+    ],
+)
+def test_read_file_env_backslash_parity_in_quotes(tmp_path, body, expected):
+    f = tmp_path / ".env"
+    f.write_text(body)
+    result = read_file(str(f), root=str(tmp_path))
+    assert "SECRET_FRAGMENT" not in result["content"]
+    assert result["content"].split("\n") == [f"{k}=<redacted>" for k in expected]
 
 
 def test_read_file_env_non_key_line_opens_quote(tmp_path):

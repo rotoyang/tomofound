@@ -911,7 +911,8 @@ CREDENTIAL_READ_LIMIT = 10 * 1024 * 1024  # 10 MiB
 _CREDENTIAL_BASENAMES = frozenset({"oauth_creds.json", "credentials.json", "auth.json"})
 _CREDENTIAL_NOTE = "credential file: values withheld; use trivy_scan for secret detection"
 _QUOTE_CHARS = ('"', "'", "`")
-_ENV_KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
+_ENV_KEY_MAX = 64
+_ENV_KEY_RE =re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
 
 
 def _is_credential_file(path: str) -> bool:
@@ -936,8 +937,23 @@ def _redact_json_value(value):
 
 
 def _closes_quote(text: str, quote: str) -> bool:
-    """True if text contains an unescaped `quote` character."""
-    return re.search(r"(?<!\\)" + re.escape(quote), text) is not None
+    """True if text contains an unescaped `quote` character.
+
+    Scans left to right so runs of backslashes are paired correctly: in `"` and backtick
+    values a backslash escapes the next character (so `\\\\"` closes but `\\"` does not).
+    Single quotes do not process escapes (dotenv convention).
+    """
+    escapes = quote != "'"
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if escapes and ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            return True
+        i += 1
+    return False
 
 
 def _redact_lines(text: str) -> str:
@@ -967,7 +983,8 @@ def _redact_lines(text: str) -> str:
         # shortcut: an unquoted multi-line value cannot be told apart from new KEY= lines;
         # an alnum-only continuation ending in "=" reads as KEY=. Dotenv-style quoting is
         # the supported multi-line form.
-        if m:
+        # Names longer than _ENV_KEY_MAX are never real variables; do not echo them.
+        if m and len(m.group(1)) <= _ENV_KEY_MAX:
             out.append(f"{m.group(1)}=<redacted>")
     return "\n".join(out)
 
