@@ -1,19 +1,44 @@
-import os, sys, json, pytest, zipfile, io
-from unittest.mock import patch, MagicMock
-import tempfile, shutil
+import json
+import os
+import shutil
+import sys
+import tempfile
+import zipfile
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from server.trivy_server import (
-    find_or_install_trivy, detect_scan_level, query_osv, discover_targets, read_file,
-    write_file, clone_repo, cleanup_clone, _is_safe_root,
-    _tag_file, _plugin_from_path, _source_type, _STANDARD_ROOTS, _READ_ALLOWED_PREFIXES,
-    _WRITE_ALLOWED_PREFIXES, CLONE_PREFIX, TOOLS_DIR,
-    render_prompt, _strip_frontmatter, _load_prompt_source, _PROMPT_NAME,
-    extract_zip, to_sarif, ZIP_MEMBER_LIMIT,
-    store_findings, generate_report, scan_all, _scan_sessions, compute_risk_score,
-    normalize_trivy, REPORTS_DIR,
-    classify_trust, _extract_publisher, _KNOWN_OFFICIAL_PUBLISHERS,
-    _SCAN_DEPTH_BY_TIER,
+    _PROMPT_NAME,
+    _READ_ALLOWED_PREFIXES,
+    _STANDARD_ROOTS,
+    CLONE_PREFIX,
+    _extract_publisher,
+    _is_safe_root,
+    _load_prompt_source,
+    _plugin_from_path,
+    _scan_sessions,
+    _source_type,
+    _strip_frontmatter,
+    _tag_file,
+    classify_trust,
+    cleanup_clone,
+    clone_repo,
+    compute_risk_score,
+    detect_scan_level,
+    discover_targets,
+    extract_zip,
+    find_or_install_trivy,
+    generate_report,
+    normalize_trivy,
+    query_osv,
+    read_file,
+    render_prompt,
+    scan_all,
+    store_findings,
+    to_sarif,
+    write_file,
 )
 
 
@@ -958,7 +983,7 @@ def test_to_sarif_with_scan_root():
 
 # --- SSRF defense for extract_zip ---
 
-from server.trivy_server import _is_safe_remote_url, normalize_trivy
+from server.trivy_server import _is_safe_remote_url
 
 
 def test_safe_url_rejects_http_scheme():
@@ -1105,7 +1130,7 @@ def test_normalize_trivy_into_to_sarif():
 
 # --- catalogs_status ----------------------------------------------------
 
-from server.trivy_server import catalogs_status, _osv_status, _atr_status, _trivy_status
+from server.trivy_server import _atr_status, _osv_status, _trivy_status, catalogs_status
 
 
 def test_osv_status_static_descriptor():
@@ -1226,8 +1251,6 @@ def test_catalogs_status_check_upstream_adds_drift_info(monkeypatch):
 
 
 
-from server.trivy_server import compute_risk_score
-
 
 def test_compute_risk_score_empty_findings_is_safe():
     r = compute_risk_score([])
@@ -1347,6 +1370,7 @@ def test_compute_risk_score_handles_none_entries():
 # --- atr_scan_path -----------------------------------------------------------
 
 from server.trivy_server import atr_scan_path
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 import atr_catalog as _atr_catalog
 
@@ -2443,9 +2467,8 @@ def test_download_gives_up_after_the_attempt_limit(tmp_path):
         return _FlakyResp(payload, die_after=0)._open(req)
 
     with patch("urllib.request.urlopen", side_effect=always_dies), \
-         patch("time.sleep"):
-        with pytest.raises(RuntimeError) as exc:
-            ts._download_trivy_archive("https://example/t.tar.gz", str(dest))
+         patch("time.sleep"), pytest.raises(RuntimeError) as exc:
+        ts._download_trivy_archive("https://example/t.tar.gz", str(dest))
     assert "gave up after" in str(exc.value)
     assert "ConnectionResetError" in str(exc.value)
 
@@ -2458,3 +2481,435 @@ def test_budget_expiry_is_not_retried(tmp_path):
     body = src[src.index("def _download_trivy_archive"):]
     body = body[:body.index("\ndef ", 1)]
     assert "except _TrivyDownloadTimeout:" in body and "raise " in body
+
+
+# --- --ensure-tools: fast path, file locks, serialised downloads ---------------
+# All hermetic: VENV is redirected into tmp_path (every lock/ATR/Trivy path is
+# derived from it), and nothing here downloads or builds a real venv.
+
+import inspect
+import subprocess as _subprocess
+
+
+@pytest.fixture
+def tool_env(tmp_path, monkeypatch):
+    import server.trivy_server as ts
+    monkeypatch.setattr(ts, "VENV", str(tmp_path / ".tomofound" / "venv"))
+    monkeypatch.setattr(ts.shutil, "which", lambda *_a, **_k: None)
+    return ts
+
+
+def _venv_python(ts):
+    return os.path.join(ts.VENV, ts._VENV_BIN, "python" + ts._EXE)
+
+
+def _mk_venv(ts, marker=None):
+    py = _venv_python(ts)
+    os.makedirs(os.path.dirname(py), exist_ok=True)
+    open(py, "w").close()
+    if marker is not False:
+        with open(os.path.join(ts.VENV, ".tomofound-deps"), "w") as f:
+            f.write(ts._DEPS_VERSION if marker is None else marker)
+
+
+def _mk_atr(ts, content=None):
+    d = os.path.join(os.path.dirname(ts.VENV), "catalogs", "atr")
+    os.makedirs(d, exist_ok=True)
+    if content is None:
+        content = json.dumps({"version": _atr_catalog.ATR_PIN})
+    mode = "wb" if isinstance(content, bytes) else "w"
+    with open(os.path.join(d, "meta.json"), mode) as f:
+        f.write(content)
+
+
+def _mk_trivy(ts):
+    d = os.path.join(os.path.dirname(ts.VENV), "tools")
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "trivy" + ts._EXE), "w").close()
+
+
+def _all_ready(ts):
+    _mk_venv(ts)
+    _mk_atr(ts)
+    _mk_trivy(ts)
+
+
+class _RecLock:
+    """Stand-in for _file_lock that records enter/exit order."""
+
+    def __init__(self, events, on_enter=None):
+        self.events, self.on_enter, self.paths = events, on_enter, []
+
+    def __call__(self, path):
+        self.paths.append(path)
+        return self
+
+    def __enter__(self):
+        self.events.append("lock")
+        if self.on_enter:
+            self.on_enter()
+
+    def __exit__(self, *exc):
+        self.events.append("unlock")
+        return False
+
+
+def test_fast_path_derived_paths_match_the_real_constants():
+    """The fast path re-derives the ATR/Trivy locations from VENV because the
+    module-level constants don't exist yet at that point. Guard against drift."""
+    import server.trivy_server as ts
+    root = os.path.dirname(ts.VENV)
+    assert os.path.join(root, "catalogs", "atr", "meta.json") == _atr_catalog.META_PATH
+    assert os.path.join(root, "tools", "trivy" + ts._EXE) == ts.TOOLS_TRIVY
+    assert ts._atr_pin_from_source() == _atr_catalog.ATR_PIN
+
+
+def test_tools_ready_when_everything_is_present(tool_env):
+    ts = tool_env
+    _all_ready(ts)
+    assert ts._tools_ready() is True
+
+
+def test_tools_ready_accepts_trivy_on_path_alone(tool_env, monkeypatch):
+    ts = tool_env
+    _mk_venv(ts)
+    _mk_atr(ts)
+    assert ts._tools_ready() is False                      # no Trivy anywhere yet
+    monkeypatch.setattr(ts.shutil, "which", lambda *_a, **_k: "/usr/local/bin/trivy")
+    assert ts._tools_ready() is True
+
+
+@pytest.mark.parametrize("breakage", [
+    "no-marker", "stale-marker", "no-venv-python", "no-atr", "old-atr",
+    "atr-empty", "atr-truncated", "atr-list", "atr-null", "atr-not-utf8",
+    "marker-not-utf8", "no-trivy",
+])
+def test_tools_ready_false_when_any_piece_is_missing_or_corrupt(tool_env, breakage):
+    ts = tool_env
+    _all_ready(ts)
+    root = os.path.dirname(ts.VENV)
+    meta = os.path.join(root, "catalogs", "atr", "meta.json")
+    marker = os.path.join(ts.VENV, ".tomofound-deps")
+    if breakage == "no-marker":
+        os.remove(marker)
+    elif breakage == "stale-marker":
+        with open(marker, "w") as f:
+            f.write("0")
+    elif breakage == "no-venv-python":
+        os.remove(_venv_python(ts))
+    elif breakage == "no-atr":
+        os.remove(meta)
+    elif breakage == "old-atr":
+        _mk_atr(ts, json.dumps({"version": "v0.0.1"}))
+    elif breakage == "atr-empty":
+        _mk_atr(ts, "")
+    elif breakage == "atr-truncated":
+        _mk_atr(ts, '{"version": "v3.')
+    elif breakage == "atr-list":
+        _mk_atr(ts, "[]")
+    elif breakage == "atr-null":
+        _mk_atr(ts, "null")
+    elif breakage == "atr-not-utf8":
+        _mk_atr(ts, b"\xff\xfe\x00bad")
+    elif breakage == "marker-not-utf8":
+        with open(marker, "wb") as f:
+            f.write(b"\xff\xfe\x80")
+    elif breakage == "no-trivy":
+        os.remove(os.path.join(root, "tools", "trivy" + ts._EXE))
+    assert ts._tools_ready() is False
+
+
+def test_fast_path_helpers_are_stdlib_only_and_offline():
+    """They run on the system Python before the venv exists: no atr_catalog
+    (imports yaml), no network."""
+    import server.trivy_server as ts
+    for fn in (ts._tools_ready, ts._atr_ready, ts._atr_pin_from_source,
+               ts._trivy_ready, ts._venv_ready, ts._read_deps_marker):
+        # "atr_catalog.py" (the file name it reads as text) is fine; attribute use is not.
+        src = inspect.getsource(fn).replace("atr_catalog.py", "")
+        for banned in ("atr_catalog.", "import atr_catalog", "yaml", "urllib", "urlopen", "socket"):
+            assert banned not in src, f"{fn.__name__} must not use {banned}"
+
+
+def test_fast_path_dispatches_before_bootstrap_in_source():
+    import server.trivy_server as ts
+    src = open(ts.__file__, "r", encoding="utf-8").read()
+    main_block = src[src.index('if __name__ == "__main__":\n'):]
+    assert main_block.index('"--ensure-tools" in sys.argv and _tools_ready()') < main_block.index("_bootstrap()")
+
+
+def test_ensure_tools_all_ready_exits_zero_without_reexec_or_output(tmp_path):
+    """End to end on the real script: with everything in place it exits 0 on the
+    system interpreter. The venv python here is an empty file, so a re-exec (or
+    any bootstrap) would fail loudly rather than pass."""
+    import server.trivy_server as ts
+    env = dict(os.environ, HOME=str(tmp_path), USERPROFILE=str(tmp_path))
+    fake = type("T", (), {})()
+    fake.VENV = os.path.join(str(tmp_path), ".tomofound", "venv")
+    fake._VENV_BIN, fake._EXE, fake._DEPS_VERSION = ts._VENV_BIN, ts._EXE, ts._DEPS_VERSION
+    _mk_venv(fake)
+    _mk_atr(fake)
+    _mk_trivy(fake)
+    proc = _subprocess.run([sys.executable, "-I", ts.__file__, "--ensure-tools"],
+                           env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    assert not os.path.exists(os.path.join(str(tmp_path), ".tomofound", "tools.lock")), \
+        "the fast path must not even touch the locks"
+
+
+# --- _ensure_tools_cli ---------------------------------------------------------
+
+def test_ensure_cli_ready_does_not_install_or_touch_network(tool_env, monkeypatch, capsys):
+    ts = tool_env
+    _all_ready(ts)
+    events = []
+    rec = _RecLock(events)
+    monkeypatch.setattr(ts, "_file_lock", rec)
+    with patch.object(ts, "_install_tools_cli") as install, \
+         patch("urllib.request.urlopen") as urlopen:
+        rc = ts._ensure_tools_cli()
+    assert rc == 0
+    install.assert_not_called()
+    urlopen.assert_not_called()
+    assert capsys.readouterr().out == ""
+    assert events == ["lock", "unlock"]
+
+
+@pytest.mark.parametrize("missing", ["atr", "trivy"])
+def test_ensure_cli_installs_when_atr_or_trivy_missing_under_the_lock(tool_env, monkeypatch, missing):
+    ts = tool_env
+    _all_ready(ts)
+    root = os.path.dirname(ts.VENV)
+    if missing == "atr":
+        os.remove(os.path.join(root, "catalogs", "atr", "meta.json"))
+    else:
+        os.remove(os.path.join(root, "tools", "trivy" + ts._EXE))
+    events = []
+    rec = _RecLock(events)
+    monkeypatch.setattr(ts, "_file_lock", rec)
+
+    def fake_install(**kw):
+        events.append("install")
+        return 0
+
+    with patch.object(ts, "_install_tools_cli", side_effect=fake_install) as install:
+        rc = ts._ensure_tools_cli()
+    assert rc == 0
+    install.assert_called_once_with(skip_current_atr=True)
+    assert events == ["lock", "install", "unlock"], "download must happen inside the lock"
+    assert os.path.basename(rec.paths[0]) == "tools.lock"
+    assert os.path.dirname(rec.paths[0]) == os.path.dirname(ts.VENV)
+
+
+def test_ensure_cli_second_waiter_skips_download_when_first_finished(tool_env, monkeypatch):
+    """Two --ensure-tools racing: the loser, once it gets the lock, finds the
+    tools in place and must not download again."""
+    ts = tool_env
+    _mk_venv(ts)
+    events = []
+    monkeypatch.setattr(ts, "_file_lock",
+                        _RecLock(events, on_enter=lambda: (_mk_atr(ts), _mk_trivy(ts))))
+    with patch.object(ts, "_install_tools_cli") as install:
+        assert ts._ensure_tools_cli() == 0
+    install.assert_not_called()
+
+
+def test_ensure_cli_propagates_install_failure_code_and_unlocks(tool_env, monkeypatch):
+    ts = tool_env
+    _mk_venv(ts)
+    events = []
+    monkeypatch.setattr(ts, "_file_lock", _RecLock(events))
+    with patch.object(ts, "_install_tools_cli", return_value=1):
+        assert ts._ensure_tools_cli() == 1
+    assert events == ["lock", "unlock"]
+
+
+def test_ensure_cli_real_lock_file_is_created_in_the_data_dir(tool_env):
+    ts = tool_env
+    _all_ready(ts)
+    assert ts._ensure_tools_cli() == 0
+    assert os.path.isfile(os.path.join(os.path.dirname(ts.VENV), "tools.lock")), \
+        "lock file must persist (never unlinked)"
+
+
+# --- _install_tools_cli: --install-tools unchanged, --ensure-tools skips current ATR
+
+def test_install_tools_cli_default_still_refetches_atr_even_when_current(tool_env):
+    ts = tool_env
+    _all_ready(ts)
+    with patch.object(ts.atr_catalog, "update_catalog",
+                      return_value={"ok": True, "rules_compiled": 1, "rules_total": 1}) as upd, \
+         patch.object(ts, "install_trivy", return_value={"ok": True, "action": "none", "path": "x"}):
+        assert ts._install_tools_cli() == 0
+    upd.assert_called_once()
+
+
+def test_install_tools_cli_skip_current_atr_only_fetches_what_is_missing(tool_env):
+    ts = tool_env
+    _all_ready(ts)
+    with patch.object(ts.atr_catalog, "update_catalog") as upd, \
+         patch.object(ts, "install_trivy",
+                      return_value={"ok": True, "action": "installed", "version": "0.0"}) as trivy:
+        assert ts._install_tools_cli(skip_current_atr=True) == 0
+    upd.assert_not_called()
+    trivy.assert_called_once()
+    # ...but a missing catalog is still fetched.
+    os.remove(os.path.join(os.path.dirname(ts.VENV), "catalogs", "atr", "meta.json"))
+    with patch.object(ts.atr_catalog, "update_catalog",
+                      return_value={"ok": True, "rules_compiled": 1, "rules_total": 1}) as upd, \
+         patch.object(ts, "install_trivy", return_value={"ok": True, "action": "none", "path": "x"}):
+        ts._install_tools_cli(skip_current_atr=True)
+    upd.assert_called_once()
+
+
+def test_ensure_tools_dispatch_is_after_install_tools_in_source():
+    """Keeps the pre-existing `--install-tools` dispatch the first `... and ...`
+    line (another test depends on that) and ahead of the MCP import."""
+    import server.trivy_server as ts
+    src = open(ts.__file__, "r", encoding="utf-8").read()
+    install = src.index('if __name__ == "__main__" and "--install-tools" in sys.argv:')
+    ensure = src.index('if __name__ == "__main__" and "--ensure-tools" in sys.argv:')
+    assert install < ensure < src.index("    from mcp.server import Server")
+
+
+# --- _bootstrap under the venv lock --------------------------------------------
+
+@pytest.mark.skipif(os.name == "nt", reason="asserts the POSIX os.execv path")
+def test_bootstrap_builds_venv_inside_the_lock_and_writes_marker(tool_env, monkeypatch):
+    ts = tool_env
+    events = []
+    rec = _RecLock(events)
+    monkeypatch.setattr(ts, "_file_lock", rec)
+
+    def fake_run(cmd, **kw):
+        if "venv" in cmd:
+            events.append("venv")
+            _mk_venv(ts, marker=False)
+        else:
+            events.append("pip")
+        assert kw.get("stdout") is sys.stderr, "child output must not reach MCP's stdout"
+
+    with patch("subprocess.run", side_effect=fake_run), patch("os.execv") as execv:
+        ts._bootstrap()
+    assert events == ["lock", "venv", "pip", "unlock"]
+    assert os.path.basename(rec.paths[0]) == "venv.lock"
+    assert ts._read_deps_marker() == ts._DEPS_VERSION
+    execv.assert_called_once()          # lock was released before the re-exec
+
+
+@pytest.mark.skipif(os.name == "nt", reason="asserts the POSIX os.execv path")
+def test_bootstrap_rechecks_marker_after_taking_the_lock(tool_env, monkeypatch):
+    """Another process finishes the build while we wait for the lock: we must
+    not rebuild (and so must not corrupt) its venv."""
+    ts = tool_env
+    events = []
+    monkeypatch.setattr(ts, "_file_lock", _RecLock(events, on_enter=lambda: _mk_venv(ts)))
+    with patch("subprocess.run") as run, patch("os.execv"):
+        ts._bootstrap()
+    run.assert_not_called()
+    assert events == ["lock", "unlock"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="asserts the POSIX os.execv path")
+def test_bootstrap_already_ready_takes_no_lock(tool_env, monkeypatch):
+    ts = tool_env
+    _mk_venv(ts)
+    events = []
+    monkeypatch.setattr(ts, "_file_lock", _RecLock(events))
+    with patch("subprocess.run") as run, patch("os.execv"):
+        ts._bootstrap()
+    run.assert_not_called()
+    assert events == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="asserts the POSIX os.execv path")
+def test_bootstrap_releases_lock_when_pip_fails(tool_env, monkeypatch):
+    ts = tool_env
+    events = []
+    monkeypatch.setattr(ts, "_file_lock", _RecLock(events))
+
+    def fake_run(cmd, **kw):
+        if "venv" in cmd:
+            _mk_venv(ts, marker=False)
+            return
+        raise _subprocess.CalledProcessError(1, cmd)
+
+    with patch("subprocess.run", side_effect=fake_run), patch("os.execv") as execv:
+        with pytest.raises(_subprocess.CalledProcessError):
+            ts._bootstrap()
+    assert events == ["lock", "unlock"]
+    assert ts._read_deps_marker() is None, "no marker may be written for a failed install"
+    execv.assert_not_called()
+
+
+# --- _file_lock itself ---------------------------------------------------------
+
+def test_file_lock_posix_takes_and_releases_flock(tmp_path):
+    fcntl = pytest.importorskip("fcntl")
+    import server.trivy_server as ts
+    p = str(tmp_path / "sub" / "x.lock")        # parent dir must be created
+    with patch("fcntl.flock") as flock:
+        with ts._file_lock(p):
+            assert [c.args[1] for c in flock.call_args_list] == [fcntl.LOCK_EX]
+        assert [c.args[1] for c in flock.call_args_list] == [fcntl.LOCK_EX, fcntl.LOCK_UN]
+    assert os.path.isfile(p), "lock file is left in place, never unlinked"
+
+
+def test_file_lock_unlocks_and_closes_when_the_body_raises(tmp_path):
+    fcntl = pytest.importorskip("fcntl")
+    import server.trivy_server as ts
+    p = str(tmp_path / "x.lock")
+    with patch("fcntl.flock") as flock, pytest.raises(RuntimeError):
+        with ts._file_lock(p):
+            raise RuntimeError("install blew up")
+    assert [c.args[1] for c in flock.call_args_list] == [fcntl.LOCK_EX, fcntl.LOCK_UN]
+    # The handle was closed: the real lock is immediately takeable again.
+    with open(p, "a+b") as other:
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_file_lock_really_excludes_a_second_holder(tmp_path):
+    fcntl = pytest.importorskip("fcntl")
+    import server.trivy_server as ts
+    p = str(tmp_path / "x.lock")
+    with ts._file_lock(p), open(p, "a+b") as other:
+        with pytest.raises(OSError):                      # BlockingIOError
+            fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with open(p, "a+b") as other:                              # free again afterwards
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_file_lock_windows_retries_nonblocking_and_unlocks_same_region(tmp_path, monkeypatch):
+    """msvcrt.locking: LK_NBLCK in our own retry loop (LK_LOCK gives up after
+    ~10 s), and seek(0) before both lock and unlock so the 1-byte region matches."""
+    import server.trivy_server as ts
+    calls = []
+    attempts = {"n": 0}
+    holder = {}
+
+    class FakeMsvcrt:
+        LK_NBLCK, LK_UNLCK, LK_LOCK = 2, 0, 1
+
+        @staticmethod
+        def locking(fd, mode, nbytes):
+            calls.append((mode, nbytes, holder["f"].tell()))
+            if mode == FakeMsvcrt.LK_NBLCK:
+                attempts["n"] += 1
+                if attempts["n"] < 3:
+                    raise OSError(13, "region already locked")
+
+    monkeypatch.setitem(sys.modules, "msvcrt", FakeMsvcrt)
+    sleeps = []
+    monkeypatch.setattr(ts.time, "sleep", lambda s: sleeps.append(s))
+    with open(str(tmp_path / "w.lock"), "a+b") as f:
+        holder["f"] = f
+        f.write(b"abcdef")                                     # leave the pointer off 0
+        with patch.object(ts.os, "name", "nt"):
+            ts._lock_acquire(f)
+            f.seek(4)                                          # body moved the pointer
+            ts._lock_release(f)
+    assert [c[0] for c in calls] == [2, 2, 2, 0]               # 2 refusals, success, unlock
+    assert all(c[1] == 1 for c in calls)
+    assert all(c[2] == 0 for c in calls), "every lock/unlock must start at offset 0"
+    assert len(sleeps) == 2
