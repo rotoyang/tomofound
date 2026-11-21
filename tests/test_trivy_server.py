@@ -548,7 +548,7 @@ def test_read_file_env_style_content_is_withheld(tmp_path, name):
             assert fragment not in result["content"]
 
 
-@pytest.mark.parametrize("name", [".env.json", "prod.env.json"])
+@pytest.mark.parametrize("name", [".env.json", ".env.production.json"])
 def test_read_file_env_named_json_is_withheld(tmp_path, name):
     f = tmp_path / name
     f.write_text('{"SECRET_FRAGMENT": "abc123"}')
