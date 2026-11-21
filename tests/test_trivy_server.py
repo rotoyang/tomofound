@@ -527,18 +527,17 @@ def test_read_file_redacts_gemini_env(tmp_path):
     f.write_text("# gemini\n\nGEMINI_API_KEY=AIzaSECRET==\nexport TOKEN = abc=def # note\nEMPTY=\n")
     result = read_file(str(f), root=str(tmp_path))
     assert result["redacted"] is True and result["note"] == _NOTE
-    assert result["content"] == (
-        "# gemini\n\nGEMINI_API_KEY=<redacted>\nTOKEN=<redacted>\nEMPTY=<redacted>"
-    )
+    # Comments and blank lines are dropped: only the key list comes back.
+    assert result["content"] == "GEMINI_API_KEY=<redacted>\nTOKEN=<redacted>\nEMPTY=<redacted>"
 
 
-def test_read_file_redacts_env_local_with_pem_continuation(tmp_path):
+def test_read_file_redacts_env_local_drops_comments_and_unreadable_lines(tmp_path):
     f = tmp_path / ".env.local"
-    f.write_text("KEY=v\r\nMIIEvg+IBADANBgkq==\n  # keep\nnot a pair\n")
+    f.write_text("KEY=v\r\n# token=abc123\n  # keep SECRET_COMMENT\nnot a pair\n!!weird secret!!\n")
     result = read_file(str(f), root=str(tmp_path))
-    assert "MIIEvg" not in result["content"]
-    assert result["content"].split("\n") == [
-        "KEY=<redacted>", "<redacted line>", "  # keep", "<redacted line>"]
+    for fragment in ("abc123", "SECRET_COMMENT", "not a pair", "weird", "keep"):
+        assert fragment not in result["content"]
+    assert result["content"] == "KEY=<redacted>"
 
 
 def test_read_file_env_multiline_double_quoted_pem(tmp_path):
@@ -555,9 +554,7 @@ def test_read_file_env_multiline_double_quoted_pem(tmp_path):
     content = result["content"]
     for fragment in ("BEGIN", "U0VDUkVU", "QUJDREVG", "SECRET_VALUE", "END PRIVATE", "after"):
         assert fragment not in content
-    assert content.split("\n") == [
-        "PRIVATE_KEY=<redacted>", "<redacted line>", "<redacted line>",
-        "<redacted line>", "<redacted line>", "NEXT=<redacted>"]
+    assert content.split("\n") == ["PRIVATE_KEY=<redacted>", "NEXT=<redacted>"]
 
 
 def test_read_file_env_multiline_single_quoted(tmp_path):
@@ -567,22 +564,55 @@ def test_read_file_env_multiline_single_quoted(tmp_path):
     content = result["content"]
     for fragment in ("line1SECRET", "hidden", "KEY2", "leak"):
         assert fragment not in content
-    assert content.split("\n") == [
-        "CERT=<redacted>", "<redacted line>", "", "<redacted line>", "OK=<redacted>"]
+    assert content.split("\n") == ["CERT=<redacted>", "OK=<redacted>"]
 
 
 def test_read_file_env_single_line_quoted_does_not_open_block(tmp_path):
     f = tmp_path / ".env"
-    f.write_text('A="one"\n# comment kept\nB=\'two\'\n')
+    f.write_text('A="one"\n# comment dropped\nB=\'two\'\nC=`three`\n')
     result = read_file(str(f), root=str(tmp_path))
-    assert result["content"] == "A=<redacted>\n# comment kept\nB=<redacted>"
+    assert result["content"] == "A=<redacted>\nB=<redacted>\nC=<redacted>"
 
 
 def test_read_file_env_unterminated_quote_redacts_rest(tmp_path):
     f = tmp_path / ".env"
     f.write_text('A="never closed\nB=secretB\n# secretC\n')
     result = read_file(str(f), root=str(tmp_path))
-    assert result["content"] == "A=<redacted>\n<redacted line>\n<redacted line>"
+    assert result["content"] == "A=<redacted>"
+
+
+def test_read_file_env_backtick_multiline_value(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("TOKEN=`start\n# TOP_SECRET\nSECRET_FRAGMENT=\nend`\nNEXT=1\n")
+    result = read_file(str(f), root=str(tmp_path))
+    for fragment in ("TOP_SECRET", "SECRET_FRAGMENT", "start", "end"):
+        assert fragment not in result["content"]
+    assert result["content"].split("\n") == ["TOKEN=<redacted>", "NEXT=<redacted>"]
+
+
+def test_read_file_env_comment_with_secret_not_returned(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("# token=abc123\nA=1\n   # token=abc123\n")
+    result = read_file(str(f), root=str(tmp_path))
+    assert "abc123" not in result["content"]
+    assert result["content"] == "A=<redacted>"
+
+
+def test_read_file_env_output_is_only_key_lines(tmp_path):
+    f = tmp_path / ".env"
+    long_key = "K" * 70
+    f.write_text(
+        f'{long_key}="start\n# TOP_SECRET\nSECRET_FRAGMENT=x"\n'
+        "B='s1\nSECRET_FRAGMENT=\n# abc123\ns2'\n"
+        "C=`t1\nSECRET_FRAGMENT=\nt2`\n"
+        "# token=abc123\nD=ok\n"
+    )
+    result = read_file(str(f), root=str(tmp_path))
+    for fragment in ("TOP_SECRET", "SECRET_FRAGMENT", "abc123"):
+        assert fragment not in result["content"]
+    lines = result["content"].split("\n")
+    assert lines == [f"{long_key}=<redacted>", "B=<redacted>", "C=<redacted>", "D=<redacted>"]
+    assert all(line.endswith("=<redacted>") for line in lines)
 
 
 def test_read_file_env_long_key_multiline_quoted_value(tmp_path):
@@ -593,8 +623,7 @@ def test_read_file_env_long_key_multiline_quoted_value(tmp_path):
     f.write_text(f'{long_key}="start\n# TOP_SECRET\nmore_SECRET2"\nNEXT=1\n')
     result = read_file(str(f), root=str(tmp_path))
     assert "TOP_SECRET" not in result["content"] and "SECRET2" not in result["content"]
-    assert result["content"].split("\n") == [
-        f"{long_key}=<redacted>", "<redacted line>", "<redacted line>", "NEXT=<redacted>"]
+    assert result["content"].split("\n") == [f"{long_key}=<redacted>", "NEXT=<redacted>"]
 
 
 def test_read_file_env_non_key_line_opens_quote(tmp_path):
@@ -602,8 +631,7 @@ def test_read_file_env_non_key_line_opens_quote(tmp_path):
     f.write_text('not a key = "open\n# TOP_SECRET\nclose"\nA=1\n')
     result = read_file(str(f), root=str(tmp_path))
     assert "TOP_SECRET" not in result["content"]
-    assert result["content"].split("\n") == [
-        "<redacted line>", "<redacted line>", "<redacted line>", "A=<redacted>"]
+    assert result["content"] == "A=<redacted>"
 
 
 def test_read_file_broken_json_withheld(tmp_path):

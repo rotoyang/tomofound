@@ -910,6 +910,7 @@ def classify_trust(targets: list) -> dict:
 CREDENTIAL_READ_LIMIT = 10 * 1024 * 1024  # 10 MiB
 _CREDENTIAL_BASENAMES = frozenset({"oauth_creds.json", "credentials.json", "auth.json"})
 _CREDENTIAL_NOTE = "credential file: values withheld; use trivy_scan for secret detection"
+_QUOTE_CHARS = ('"', "'", "`")
 _ENV_KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
 
 
@@ -940,31 +941,34 @@ def _closes_quote(text: str, quote: str) -> bool:
 
 
 def _redact_lines(text: str) -> str:
+    """Reduce .env-style text to a key list: one `KEY=<redacted>` line per detected key.
+
+    Comments, blank lines and anything that is not a recognisable KEY= line are dropped
+    rather than echoed, so no free text from the file can reach the LLM.
+    """
     out = []
     open_quote = None  # quote char of a multi-line value we are inside, else None
     for line in text.splitlines():
-        stripped = line.strip()
         if open_quote:
-            # Inside a quoted multi-line value (e.g. a PEM key): every non-blank line,
-            # including "#" lines and base64 "==" lines, is value content. Blank lines
-            # carry nothing, so they pass through.
-            out.append(line if not stripped else "<redacted line>")
+            # Inside a quoted multi-line value (e.g. a PEM key): every line, including
+            # "#" lines and "KEY=" lookalikes, is value content and is never a key.
             if _closes_quote(line, open_quote):
                 open_quote = None
             continue
+        stripped = line.strip()
         if not stripped or stripped.startswith("#"):
-            out.append(line)
             continue
         # Quote tracking is independent of key shape: any line whose text after the first
         # "=" opens a quote without closing it starts a multi-line value.
         value = line.partition("=")[2].lstrip()
-        if value[:1] in ('"', "'") and not _closes_quote(value[1:], value[0]):
+        if value[:1] in _QUOTE_CHARS and not _closes_quote(value[1:], value[0]):
             open_quote = value[0]
         m = _ENV_KEY_RE.match(line)
         # shortcut: an unquoted multi-line value cannot be told apart from new KEY= lines;
         # an alnum-only continuation ending in "=" reads as KEY=. Dotenv-style quoting is
         # the supported multi-line form.
-        out.append(f"{m.group(1)}=<redacted>" if m else "<redacted line>")
+        if m:
+            out.append(f"{m.group(1)}=<redacted>")
     return "\n".join(out)
 
 
