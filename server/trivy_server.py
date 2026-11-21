@@ -907,6 +907,43 @@ def classify_trust(targets: list) -> dict:
     return {"targets": results, "summary": summary}
 
 
+CREDENTIAL_READ_LIMIT = 10 * 1024 * 1024  # 10 MiB
+_CREDENTIAL_BASENAMES = frozenset({"oauth_creds.json", "credentials.json", "auth.json"})
+_CREDENTIAL_NOTE = "credential file: values withheld; use trivy_scan for secret detection"
+_ENV_WITHHELD = "content withheld: .env-style credential file"
+
+
+def _is_credential_file(path: str) -> bool:
+    """True for files whose values must never reach the LLM verbatim."""
+    name = os.path.basename(path).lower()
+    return name in _CREDENTIAL_BASENAMES or name == ".env" or name.endswith(".env") or name.startswith(".env.")
+
+
+def _redact_json_value(value):
+    # bool is an int subclass, so bool/None must be handled before numbers.
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return f"<redacted:{len(value)} chars>"
+    if isinstance(value, (int, float)):
+        return f"<redacted:{len(str(value))} chars>"
+    if isinstance(value, dict):
+        return {k: _redact_json_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_json_value(v) for v in value]
+    return "<redacted>"
+
+
+def _redact_json_text(text: str) -> str:
+    # A .json credential file that fails to parse is withheld entirely: line-mode masking
+    # cannot be trusted on arbitrary broken JSON (strings may span lines).
+    try:
+        parsed = json.loads(text.lstrip("﻿"))
+        return json.dumps(_redact_json_value(parsed), indent=2, ensure_ascii=False)
+    except (ValueError, RecursionError):
+        return "content withheld: unparseable JSON"
+
+
 def read_file(path: str, root: str = None) -> dict:
     abs_path = os.path.abspath(os.path.expanduser(path))
     allowed = [_ensure_trailing_sep(p) for p in _READ_ALLOWED_PREFIXES]
@@ -918,9 +955,26 @@ def read_file(path: str, root: str = None) -> dict:
         return {"error": "path not permitted"}
     if not os.path.isfile(abs_path):
         return {"error": "file not found"}
+    # Check the resolved target too so a harmless-named symlink can't bypass redaction.
+    is_cred = _is_credential_file(abs_path) or _is_credential_file(os.path.realpath(abs_path))
     try:
         with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
             size = os.fstat(f.fileno()).st_size
+            if is_cred:
+                # JSON masking only when one end is a known JSON credential file and no end is
+                # .env-like; anything .env-like on either end (e.g. ".env.json", or a symlink pair) is withheld.
+                names = {os.path.basename(abs_path).lower(), os.path.basename(os.path.realpath(abs_path)).lower()}
+                if size > CREDENTIAL_READ_LIMIT:
+                    content = "content withheld: too large"
+                elif any(n == ".env" or n.endswith(".env") or n.startswith(".env.") for n in names) \
+                        or not names & _CREDENTIAL_BASENAMES:
+                    # shortcut: no .env parsing at all (dotenv dialects disagree on quoting and
+                    # escapes, so any line-level masking leaks); the file is not even read.
+                    content = _ENV_WITHHELD
+                else:
+                    # No FILE_READ_LIMIT truncation: JSON must be complete to be masked.
+                    content = _redact_json_text(f.read())
+                return {"redacted": True, "content": content, "size_bytes": size, "note": _CREDENTIAL_NOTE}
             if size <= FILE_READ_LIMIT:
                 return {"content": f.read(), "size_bytes": size}
             return {"content": f.read(FILE_READ_LIMIT), "size_bytes": size, "truncated": True}
