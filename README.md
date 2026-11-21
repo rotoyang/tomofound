@@ -20,7 +20,7 @@ Scans extensions installed for Claude Code, Gemini CLI, and Codex CLI for secret
 
 ## How it works
 
-tomofound is **install once, then use it from Claude, Codex, or Gemini CLI**:
+tomofound is **install once, then use it from Claude, Codex, or Gemini CLI**. In Claude Code, installing the plugin ([see below](#claude-code--install-as-a-plugin), from the next release) is the whole setup; for everything else:
 
 1. Run `setup.sh` one time to install the MCP server and scan-rule prompt.
 2. Add the scan-rule prompt as a **Skill** in Claude Desktop App (one-time drag-and-drop).
@@ -36,6 +36,47 @@ tomofound is **install once, then use it from Claude, Codex, or Gemini CLI**:
 - `git` on PATH (only needed when you pass a `https://github.com/...` URL)
 
 ## Installation (one-time)
+
+Pick the path that matches where you use tomofound:
+
+| You use… | Install with |
+|---|---|
+| **Claude Code** | the plugin — [below](#claude-code--install-as-a-plugin) |
+| **Claude Desktop chat**, **Codex**, **Gemini CLI** | `setup.sh` — [Step 1](#step-1--run-the-installer) onward |
+
+Both paths use the same MCP server and the same `~/.tomofound/` data directory, so reports, the ATR catalog and Trivy are shared if you install both.
+
+### Claude Code — install as a plugin
+
+> **Available from the next release.** The plugin is served from a release tag, and the current tag (`v0.5.0`) does not contain the plugin files yet. Until a release ships them, use `setup.sh` below.
+
+Inside Claude Code:
+
+```
+/plugin marketplace add rotoyang/tomofound
+/plugin install tomofound@tomofound
+```
+
+Then run the skill as **`/tomofound:security-scan`** (plugin skills are namespaced by plugin name). The plugin registers the `tomofound` MCP server itself — there is no `claude_desktop_config.json` edit and no drag-and-drop skill step.
+
+A `SessionStart` hook runs `trivy_server.py --ensure-tools` in the background (async, 600-second limit). It is a no-op once the ATR catalog and Trivy are in place; otherwise it fetches them so your first scan is a scan, not a download. It never blocks Claude Code from starting, and it writes to `~/.tomofound/` exactly as the installer does — the plugin does **not** move data into Claude Code's plugin data directory.
+
+The plugin is pinned the same way as the installer: the marketplace points at a release tag, never at `main`, so nothing merged to `main` reaches `/plugin install` until a release says so.
+
+#### Moving from `setup.sh` to the plugin (Claude Code)
+
+If you ran `setup.sh` earlier and had also registered `tomofound` as a Claude Code MCP server (for example with `claude mcp add` or `claude mcp add-from-claude-desktop`), that registration and the plugin's would both start a `tomofound` server. Remove the old one first:
+
+```bash
+claude mcp list                              # look for a standalone "tomofound"
+claude mcp remove tomofound --scope user     # or --scope local / --scope project, whichever list shows
+```
+
+`claude mcp remove` only looks in the local scope unless you pass `--scope`, so a user-scope entry reports "No local MCP server found" without it.
+
+- `setup.sh` itself only writes `~/Library/Application Support/Claude/claude_desktop_config.json` (and the Codex/Gemini files), never Claude Code's own config, so for many users there is nothing to remove.
+- **Do not** delete the `tomofound` entry from `claude_desktop_config.json` if you still use Claude Desktop chat, Codex or Gemini CLI — those keep using `setup.sh`.
+- Keep `~/.tomofound/`. The plugin reuses it; deleting it only forces a re-download.
 
 ### Step 1 — Run the installer
 
@@ -329,27 +370,44 @@ tomofound is itself a piece of software you run with elevated trust, so we list 
 
 | URL pattern | Purpose | Who triggers it |
 |-------------|---------|-----------------|
+| `https://pypi.org/` (wheels from `files.pythonhosted.org`) | `pip install` of the pinned `mcp` SDK and `PyYAML` into `~/.tomofound/venv` | First server start (or the plugin's `--ensure-tools` hook), when the venv is missing or out of date |
 | `https://github.com/aquasecurity/trivy/releases/download/v0.72.0/...` | Download the pinned Trivy binary + its published checksums | First scan, when Trivy isn't on `PATH` |
 | `https://api.osv.dev/v1/query` | OSV vulnerability lookup (Level-4 fallback when Trivy has no dependency manifest) | The `check_osv` MCP tool |
 | `https://github.com/<owner>/<repo>(.git)` | `git clone --depth 1` for pre-install scan of a GitHub URL | The `clone_repo` MCP tool |
 | `https://<host>/<path>.zip` | Download a `.zip` for pre-install scan | The `extract_zip` MCP tool — **https only**, refuses private / loopback / link-local / cloud-metadata hosts, re-validates every redirect target |
 | `https://raw.githubusercontent.com/rotoyang/tomofound/<release tag>/...` | Installer fetches the server + skill at the pinned tag (`TOMOFOUND_REF`, default the current release; a missing tag fails loudly rather than falling back to `main`) | `setup.sh` only |
+| `https://github.com/rotoyang/tomofound` at the release tag (`ref` in `.claude-plugin/marketplace.json`) | Claude Code clones the plugin at the pinned tag | The user's `/plugin marketplace add` / `/plugin install` — performed by Claude Code, not by tomofound code |
+| The ATR and Trivy URLs above | Same downloads as the installer, run in the background at session start | The plugin's `SessionStart` hook (`--ensure-tools`) — a no-op once both are in place |
 | `https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/v3.5.11/LICENSE` | Re-verify ATR upstream license before trusting a catalog refresh | The `atr_update` MCP tool |
 | `https://github.com/Agent-Threat-Rule/agent-threat-rules/archive/refs/tags/v3.5.11.tar.gz` | Download the pinned ATR source tarball | The `atr_update` MCP tool — user-initiated only, never auto-run |
 | `https://api.github.com/repos/Agent-Threat-Rule/agent-threat-rules/releases/latest` | Report whether a newer ATR release exists than our pin (never downloads) | The `catalogs_status` MCP tool — only when called with `check_upstream: true`; local-only by default |
+| `codeload.github.com` | 302 redirect destination of the ATR tarball download (`github.com/.../archive/refs/tags/<tag>.tar.gz`) | The `atr_update` MCP tool (and the `--ensure-tools` hook), via the GitHub redirect |
+| `release-assets.githubusercontent.com` | 302 redirect destination of the Trivy release download (`github.com/aquasecurity/trivy/releases/download/...`) | The Trivy download (first scan or the `--ensure-tools` hook), via the GitHub redirect; the binary is still checked against the published sha256 |
+| `mirror.gcr.io`, `ghcr.io` | Trivy's default OCI registries for its vulnerability DB, Java DB and checks bundle (`--db-repository`, `--java-db-repository`, `--checks-bundle-repository` defaults) | Connected to by the **Trivy subprocess** during a scan, not by tomofound's own code |
+
+`network.hosts` in `.claude-plugin/plugin.json` discloses all of the hosts above for the plugin. It is informational: Claude Code does not use it to allow or block connections.
 
 ### Repository assets
 
 | Asset | Source | Notes |
 |-------|--------|-------|
 | `server/trivy_server.py` | This repo | The MCP server itself |
+| `server/atr_catalog.py` | This repo | ATR catalog pin, download and parsing; imported by `trivy_server.py` at runtime |
 | `server/python_analyzer.py` | This repo | AST + taint static analysis |
-| `skills/security-scan/SKILL.md` | This repo | Detection rules loaded as an MCP prompt |
+| `skills/security-scan/SKILL.md` | This repo | Detection rules loaded as an MCP prompt; also the plugin's `/tomofound:security-scan` skill (auto-detected) |
 | `integrations/codex/skills/security-scan/SKILL.md` | This repo | Codex-side wrapper around the same MCP tools |
 | `integrations/gemini/skills/security-scan/SKILL.md` | This repo | Gemini CLI-side wrapper around the same MCP tools |
 | `setup.sh` | This repo | One-shot installer |
+| `.claude-plugin/plugin.json` | This repo | Claude Code plugin manifest (name, version, author, MIT license, `network.hosts`). `version` must equal `setup.sh`'s `TOMOFOUND_REF` minus the `v`. `network.hosts` is a disclosure list of the hosts in the outbound table (`github.com`, `api.github.com`, `raw.githubusercontent.com`, `codeload.github.com`, `release-assets.githubusercontent.com`, `api.osv.dev`, `pypi.org`, `files.pythonhosted.org`, `mirror.gcr.io`, `ghcr.io`); Claude Code does not enforce it (it neither allows nor blocks any host). Add a host there whenever a new outbound URL is added |
+| `.claude-plugin/marketplace.json` | This repo | Single-plugin marketplace; the plugin `source` is this repo at the `TOMOFOUND_REF` tag, never `main` |
+| `.mcp.json` | This repo | Plugin MCP registration: `python3 ${CLAUDE_PLUGIN_ROOT}/server/trivy_server.py` |
+| `hooks/hooks.json` | This repo | Plugin `SessionStart` hook: `trivy_server.py --ensure-tools`, async, 600 s timeout |
+
+`tests/test_plugin_packaging.py` fails if the three version pins drift, if the marketplace stops pinning a tag, or if the plugin config contains a hard-coded local path.
 
 No third-party Python wheels are vendored, no binary blobs ship in the repo, and the installer touches only `~/.tomofound/`, `~/Library/Application Support/Claude/claude_desktop_config.json`, (if Codex is selected) `~/.codex/config.toml` + `~/.codex/skills/security-scan/`, and (if Gemini is selected) `~/.gemini/skills/security-scan/`.
+
+The Claude Code plugin writes nothing outside `~/.tomofound/` itself: the venv, ATR catalog, Trivy binary and reports all live there, same as the installer path. Claude Code additionally keeps its own copy of the plugin in its plugin cache; that is Claude Code's bookkeeping, not a tomofound write.
 
 ### Attribution
 
