@@ -20,10 +20,11 @@ explicit invocation.
 
 License compliance:
 - Upstream: MIT (verified directly from the LICENSE at the pinned tag —
-  see ATR_LICENSE_PROBE_URL, which derives from ATR_PIN,
-  standard GitHub MIT template, sha256 stored as _ATR_LICENSE_SHA256_HINT
-  for first-run sanity check — not used as a gate, just a hint to flag
-  obvious license-replacement supply-chain attacks).
+  see ATR_LICENSE_PROBE_URL, which derives from ATR_PIN). The "MIT License"
+  text check is a hard gate. The sha256 of the LICENSE we last reviewed is
+  stored as _ATR_LICENSE_SHA256_HINT; a different hash is NOT a refusal, it is
+  reported by update_catalog (`license_changed`) so a human re-reads the text —
+  a hint to flag a quiet license-replacement, not a gate.
 - Retention: the upstream LICENSE file is extracted into
   `~/.tomofound/catalogs/atr/LICENSE` alongside the rules, satisfying MIT's
   attribution-and-license-text requirement.
@@ -31,15 +32,16 @@ License compliance:
   version + upstream references; reports surface ATR as a named source.
 """
 
+import hashlib
+import json
 import os
 import re
-import json
 import shutil
 import tarfile
 import tempfile
-import hashlib
-import urllib.request
 import urllib.error
+import urllib.request
+
 import yaml
 
 # os.path.join (not expanduser("~/.tomofound")) so the path carries native
@@ -57,7 +59,10 @@ PARSED_CATALOG_PATH = os.path.join(CATALOG_ROOT, "catalog.json")
 # silently goes stale on the next bump, and attribution is user-visible: it is
 # returned by catalog_status() and rendered in every scan report header, so a
 # stale value credits the wrong version of someone else's work.
-ATR_PIN = "v3.5.11"
+# NOTE: trivy_server.py reads this line with a regex (--ensure-tools fast path),
+# so it must stay a single top-level `ATR_PIN = "..."` string assignment — no
+# type annotation.
+ATR_PIN = "v4.3.1"
 ATR_SOURCE_URL = (
     "https://github.com/Agent-Threat-Rule/agent-threat-rules"
     f"/archive/refs/tags/{ATR_PIN}.tar.gz"
@@ -78,10 +83,21 @@ ATTRIBUTION = (
     "https://github.com/Agent-Threat-Rule/agent-threat-rules"
 )
 
+# sha256 of the upstream LICENSE as reviewed by a human. Byte-identical at
+# v3.5.11 and v4.3.1 (21 lines, first line "MIT License"; no other LICENSE or
+# COPYING file under rules/). Not a gate — see the module docstring.
+_ATR_LICENSE_SHA256_HINT = (
+    "aaf963e77675bc977a3d059b8a2604e7f9fe527b03f005c45df80c1195c92598"
+)
+
 # Defensive limits for the tarball fetch.
-_TARBALL_MAX_BYTES = 60 * 1024 * 1024  # 60 MB — current v3.5.11 is ~28 MB
-_EXTRACT_MAX_BYTES = 100 * 1024 * 1024  # 100 MB — rules subtree is ~8 MB
-_EXTRACT_MAX_ENTRIES = 5000             # current rules: 768 files
+# Measured tarballs: v3.5.11 = 35,116,464 bytes (35.1 MB); v4.3.1 = 59,013,052
+# bytes (59.0 MB). The previous 60 MiB cap left v4.3.1 under 7% of headroom, so
+# it is raised to 120 MiB (~2x v4.3.1). Still a hard cap against a hostile
+# or runaway download.
+_TARBALL_MAX_BYTES = 120 * 1024 * 1024
+_EXTRACT_MAX_BYTES = 100 * 1024 * 1024  # rules subtree measured ~8 MB at v3.5.11; not re-measured at v4.3.1
+_EXTRACT_MAX_ENTRIES = 5000             # rule files: 768 at v3.5.11, 844 at v4.3.1
 
 # ATR condition `field` values we can meaningfully match against a file on
 # disk. ATR rules target an agent's whole runtime, so their conditions name
@@ -106,9 +122,10 @@ _EXTRACT_MAX_ENTRIES = 5000             # current rules: 768 files
 # pattern-matching them against unrelated file text:
 #   tool_response, tool_args, agent_output
 #
-# Measured on a 38-rule sample of v3.5.11: the content-only filter dropped 23
-# rules (61%) entirely, including all three tool_description poisoning rules
-# and ATR-2026-00001 direct prompt injection.
+# Historical measurement, taken on a 38-rule sample of v3.5.11 (not re-measured
+# on v4.3.1; v4's field vocabulary is the same): the content-only filter
+# dropped 23 rules (61%) entirely, including all three tool_description
+# poisoning rules and ATR-2026-00001 direct prompt injection.
 _FILE_SCANNABLE_FIELDS = frozenset({
     "content",
     "user_input",
@@ -149,6 +166,10 @@ def update_catalog() -> dict:
     license_ok, license_text, license_msg = _probe_license()
     if not license_ok:
         return {"error": f"license probe failed: {license_msg}"}
+    # The MIT check above is the gate; the hash only flags a changed text for
+    # human review (see module docstring) and never blocks the update.
+    license_sha256 = hashlib.sha256(license_text.encode("utf-8")).hexdigest()
+    license_changed = license_sha256 != _ATR_LICENSE_SHA256_HINT
 
     # Download tarball to a SIBLING temp file (not inside CATALOG_ROOT, so the
     # atomic-swap rename below isn't blocked by a stray file inside the dir).
@@ -193,8 +214,11 @@ def update_catalog() -> dict:
             "tarball_bytes": written,
             "rules_total": parsed_catalog["total_rules"],
             "rules_compiled": parsed_catalog["compiled_rules"],
+            "rules_skipped_by_reason": parsed_catalog["skipped_by_reason"],
             "categories": sorted(parsed_catalog["by_category"].keys()),
             "attribution": ATTRIBUTION,
+            "license_sha256": license_sha256,
+            "license_changed": license_changed,
         }
         with open(os.path.join(staging, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
@@ -211,14 +235,24 @@ def update_catalog() -> dict:
         if os.path.isdir(previous):
             shutil.rmtree(previous, ignore_errors=True)
 
-        return {
+        result = {
             "ok": True,
             "version": ATR_PIN,
             "rules_compiled": parsed_catalog["compiled_rules"],
             "rules_total": parsed_catalog["total_rules"],
+            "rules_skipped_by_reason": parsed_catalog["skipped_by_reason"],
             "categories": meta["categories"],
             "tarball_sha256": sha256,
+            "license_sha256": license_sha256,
+            "license_changed": license_changed,
         }
+        if license_changed:
+            result["license_review"] = (
+                "upstream LICENSE still says MIT but its sha256 differs from the "
+                "reviewed one — re-read " + ATR_LICENSE_PROBE_URL + " before "
+                "trusting this catalog"
+            )
+        return result
     finally:
         if os.path.isfile(tarball_path):
             os.unlink(tarball_path)
@@ -298,10 +332,12 @@ def _safe_extract_rules(tarball_path: str, dest_dir: str) -> dict:
                 # Realpath escape check.
                 real_target = os.path.realpath(target)
                 if inner == "LICENSE":
-                    if not real_target.startswith(real_dest):
+                    if not real_target.startswith(real_dest + os.sep):
                         raise _AtrFetchError(f"tar entry escapes dest: {name!r}")
                 else:
-                    if not real_target.startswith(real_rules):
+                    # + os.sep: a bare prefix test lets `rules/../rules_evil/x`
+                    # (a sibling sharing the "rules" prefix) through.
+                    if not real_target.startswith(real_rules + os.sep):
                         raise _AtrFetchError(f"tar entry escapes rules dir: {name!r}")
                 if member.size <= 0 or member.size > 1024 * 1024:  # per-file cap 1 MB
                     continue
@@ -341,7 +377,14 @@ def _parse_rules_dir(rules_dir: str) -> dict:
         "total_rules": 0,
         "compiled_rules": 0,
         "skipped_rules": [],
+        # reason -> count, for every rule dropped at compile time (YAML parse
+        # failures are counted under _SKIP_YAML).
+        "skipped_by_reason": {},
     }
+
+    def _skip(path: str, reason: str) -> None:
+        catalog["skipped_rules"].append({"path": path, "reason": reason})
+        catalog["skipped_by_reason"][reason] = catalog["skipped_by_reason"].get(reason, 0) + 1
 
     for dirpath, _, filenames in os.walk(rules_dir):
         for fname in sorted(filenames):
@@ -353,11 +396,13 @@ def _parse_rules_dir(rules_dir: str) -> dict:
                     raw = yaml.safe_load(f)
             except Exception as e:
                 catalog["skipped_rules"].append({"path": path, "reason": f"yaml: {e}"})
+                catalog["skipped_by_reason"][_SKIP_YAML] = (
+                    catalog["skipped_by_reason"].get(_SKIP_YAML, 0) + 1)
                 continue
             catalog["total_rules"] += 1
-            entry = _build_rule_entry(raw, path)
+            entry, reason = _compile_rule(raw, path)
             if entry is None:
-                catalog["skipped_rules"].append({"path": path, "reason": "no usable regex"})
+                _skip(path, reason)
                 continue
             catalog["rules"].append(entry)
             catalog["compiled_rules"] += 1
@@ -367,11 +412,53 @@ def _parse_rules_dir(rules_dir: str) -> dict:
     return catalog
 
 
+_SKIP_YAML = "yaml parse error"
+_SKIP_DEPRECATED = "status: deprecated"
+_SKIP_ALL_UNSCANNABLE = "condition: all with a condition not evaluable on a static file"
+_SKIP_BAD_CONDITION = "unsupported detection.condition value"
+_SKIP_NO_REGEX = "no usable regex"
+
+
 def _build_rule_entry(raw: dict, path: str) -> dict | None:
     """Convert one parsed ATR YAML rule into our internal entry. Returns None
-    if the rule has no usable regex conditions."""
-    if not isinstance(raw, dict):
+    if the rule is dropped (use `_compile_rule` to learn why)."""
+    return _compile_rule(raw, path)[0]
+
+
+def _condition_is_usable(c) -> dict | None:
+    """Return the pattern dict for a condition we can evaluate against a file
+    body, or None if we cannot (non-regex operator, runtime-only field, empty
+    or malformed regex)."""
+    if not isinstance(c, dict):
         return None
+    if c.get("operator") != "regex":
+        return None
+    if c.get("field") not in _FILE_SCANNABLE_FIELDS:
+        return None
+    value = c.get("value")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        # Compile once now to filter out catastrophic / malformed regexes.
+        re.compile(value)
+    except re.error:
+        return None
+    return {
+        "field": c.get("field"),
+        "pattern": value,
+        "description": str(c.get("description") or "").strip(),
+    }
+
+
+def _compile_rule(raw: dict, path: str) -> tuple[dict | None, str]:
+    """Like `_build_rule_entry` but returns (entry, reason). `reason` is "" when
+    an entry is produced, otherwise one of the _SKIP_* strings."""
+    if not isinstance(raw, dict):
+        return None, _SKIP_NO_REGEX
+    # ATR keeps deprecated rule IDs forever, flagged status: deprecated. They
+    # are retired detections, so they must not fire.
+    if str(raw.get("status") or "").strip().lower() == "deprecated":
+        return None, _SKIP_DEPRECATED
     rule_id = str(raw.get("id") or "").strip()
     title = str(raw.get("title") or "").strip()
     severity = _SEVERITY.get(str(raw.get("severity") or "").lower(), "medium")
@@ -386,6 +473,8 @@ def _build_rule_entry(raw: dict, path: str) -> dict | None:
             break
 
     refs = raw.get("references") or {}
+    if not isinstance(refs, dict):
+        refs = {}
     owasp_agentic = refs.get("owasp_agentic") or []
     mitre_atlas = refs.get("mitre_atlas") or []
     owasp_llm = refs.get("owasp_llm") or []
@@ -396,34 +485,36 @@ def _build_rule_entry(raw: dict, path: str) -> dict | None:
     if not isinstance(cves, list):          cves = [str(cves)]
 
     detection = raw.get("detection") or {}
+    if not isinstance(detection, dict):
+        return None, _SKIP_NO_REGEX
     conditions = detection.get("conditions") or []
     if not isinstance(conditions, list):
-        return None
+        return None, _SKIP_NO_REGEX
+
+    # detection.condition: `any` (default; one hit fires) or `all` (every
+    # condition must hit). ATR v3 and v4 only ever use these two. Anything else
+    # (e.g. a boolean expression) we cannot honour, and evaluating it as OR
+    # would over-fire, so the rule is dropped.
+    raw_mode = detection.get("condition")
+    mode = "any" if raw_mode is None else str(raw_mode).strip().lower()
+    if mode not in ("any", "all"):
+        return None, _SKIP_BAD_CONDITION
 
     patterns: list[dict] = []
     for c in conditions:
-        if not isinstance(c, dict):
+        pat = _condition_is_usable(c)
+        if pat is None:
+            # Under `all`, silently dropping a condition we cannot evaluate
+            # would turn "A AND B" into "A" — a false-positive factory. Drop
+            # the whole rule instead. Under `any`, an unevaluable alternative
+            # just means one fewer way to match.
+            if mode == "all":
+                return None, _SKIP_ALL_UNSCANNABLE
             continue
-        if c.get("operator") != "regex":
-            continue
-        if c.get("field") not in _FILE_SCANNABLE_FIELDS:
-            continue
-        value = c.get("value")
-        if not isinstance(value, str) or not value:
-            continue
-        try:
-            # Compile once now to filter out catastrophic / malformed regexes.
-            re.compile(value)
-        except re.error:
-            continue
-        patterns.append({
-            "field": c.get("field"),
-            "pattern": value,
-            "description": str(c.get("description") or "").strip(),
-        })
+        patterns.append(pat)
 
     if not patterns:
-        return None
+        return None, _SKIP_NO_REGEX
 
     return {
         "id": rule_id,
@@ -431,6 +522,7 @@ def _build_rule_entry(raw: dict, path: str) -> dict | None:
         "severity": severity,
         "maturity": maturity,
         "category": category,
+        "condition": mode,
         "patterns": patterns,
         "references": {
             "owasp_agentic": [str(x) for x in owasp_agentic],
@@ -438,7 +530,7 @@ def _build_rule_entry(raw: dict, path: str) -> dict | None:
             "owasp_llm":     [str(x) for x in owasp_llm],
             "cve":           [str(x) for x in cves],
         },
-    }
+    }, ""
 
 
 # --- Match flow -------------------------------------------------------------
@@ -446,7 +538,7 @@ def _build_rule_entry(raw: dict, path: str) -> dict | None:
 # In-memory catalog cache. Keyed on (mtime_ns, size) of the parsed-catalog
 # file so an atr_update (which rewrites the file) invalidates it naturally.
 # Compiled regex objects are attached to each pattern at load time — with
-# 670+ rules the stdlib re module's internal 512-entry cache thrashes, so
+# 800+ rules (844 in v4.3.1) the stdlib re module's internal 512-entry cache thrashes, so
 # every re.search(pattern_string, ...) would silently recompile.
 _CATALOG_MEM: dict | None = None
 _CATALOG_MEM_KEY: tuple | None = None
@@ -689,7 +781,15 @@ def _match_against_catalog(
     for rule in catalog.get("rules", []):
         if deadline is not None and time.monotonic() >= deadline:
             return findings
+        # `all` rules (compiled from detection.condition: all) fire only when
+        # EVERY pattern hits; the finding is reported on the first pattern.
+        # Anything else (incl. catalogs cached before this key existed) is `any`.
+        require_all = rule.get("condition") == "all"
+        all_hits: list = []
+        hit = None
         for pat in rule.get("patterns", []):
+            if require_all and deadline is not None and time.monotonic() >= deadline:
+                return findings
             compiled = pat.get("compiled")
             try:
                 # Prefer the object pre-compiled at catalog load; fall back to
@@ -698,40 +798,52 @@ def _match_against_catalog(
                 m = compiled.search(content) if compiled is not None \
                     else re.search(pat["pattern"], content)
             except re.error:
+                m = None
+            if require_all:
+                if not m:
+                    all_hits = []
+                    break  # one miss -> the AND fails
+                all_hits.append((pat, m))
                 continue
             if not m:
                 continue
-            line_no = content.count("\n", 0, m.start()) + 1
-            line = content.splitlines()[line_no - 1] if 0 < line_no <= content.count("\n") + 1 else ""
-            snippet_window = content[max(0, m.start() - 40):m.end() + 40]
-            findings.append({
-                "category": "PROMPT_INJECTION" if "prompt-injection" in rule["category"]
-                            else "TOOL_POISONING" if "tool-poisoning" in rule["category"]
-                            else "AGENT_MANIPULATION" if "agent-manipulation" in rule["category"]
-                            else "DATA_EXFILTRATION_VIA_PROMPT" if "context-exfiltration" in rule["category"]
-                            else "SCOPE_CREEP" if "privilege-escalation" in rule["category"]
-                            else "PROMPT_INJECTION",
-                "severity": rule["severity"],
-                "file": file_hint or "<content>",
-                "line": line_no,
-                "description": f"{rule['title']} — {pat['description']}".strip(" —"),
-                "snippet": (snippet_window[:200] if snippet_window else line.strip()[:200]),
-                "detected_by": "ATR",
-                "provenance": {
-                    "source": "atr",
-                    "catalog_version": catalog.get("version") or ATR_PIN,
-                    "rule_id": rule["id"],
-                    "rule_category": rule["category"],
-                    "rule_maturity": rule["maturity"],
-                    # Which ATR condition field this pattern came from. A hit on
-                    # user_input or tool_description is a weaker signal against a
-                    # static file than one on content, so surface it rather than
-                    # flattening every match into "ATR said so".
-                    "matched_field": pat.get("field") or "content",
-                    "rule_url": f"https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/{ATR_PIN}/rules/{rule['category']}/",
-                    "references": rule["references"],
-                },
-            })
-            # First match per rule is enough; don't multi-fire on the same rule.
+            hit = (pat, m)
             break
+        if require_all and all_hits:
+            hit = all_hits[0]
+        if hit is None:
+            continue
+        pat, m = hit
+        # One finding per rule; don't multi-fire on the same rule.
+        line_no = content.count("\n", 0, m.start()) + 1
+        line = content.splitlines()[line_no - 1] if 0 < line_no <= content.count("\n") + 1 else ""
+        snippet_window = content[max(0, m.start() - 40):m.end() + 40]
+        findings.append({
+            "category": "PROMPT_INJECTION" if "prompt-injection" in rule["category"]
+                        else "TOOL_POISONING" if "tool-poisoning" in rule["category"]
+                        else "AGENT_MANIPULATION" if "agent-manipulation" in rule["category"]
+                        else "DATA_EXFILTRATION_VIA_PROMPT" if "context-exfiltration" in rule["category"]
+                        else "SCOPE_CREEP" if "privilege-escalation" in rule["category"]
+                        else "PROMPT_INJECTION",
+            "severity": rule["severity"],
+            "file": file_hint or "<content>",
+            "line": line_no,
+            "description": f"{rule['title']} — {pat['description']}".strip(" —"),
+            "snippet": (snippet_window[:200] if snippet_window else line.strip()[:200]),
+            "detected_by": "ATR",
+            "provenance": {
+                "source": "atr",
+                "catalog_version": catalog.get("version") or ATR_PIN,
+                "rule_id": rule["id"],
+                "rule_category": rule["category"],
+                "rule_maturity": rule["maturity"],
+                # Which ATR condition field this pattern came from. A hit on
+                # user_input or tool_description is a weaker signal against a
+                # static file than one on content, so surface it rather than
+                # flattening every match into "ATR said so".
+                "matched_field": pat.get("field") or "content",
+                "rule_url": f"https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/{ATR_PIN}/rules/{rule['category']}/",
+                "references": rule["references"],
+            },
+        })
     return findings

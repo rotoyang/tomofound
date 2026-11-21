@@ -15,7 +15,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 import atr_catalog
 
-
 # --- Helpers ----------------------------------------------------------------
 
 def _sample_rule_yaml(rule_id="ATR-2026-99001", category="prompt-injection",
@@ -246,6 +245,236 @@ def test_mixed_rule_keeps_only_the_file_scannable_conditions():
         ]},
     }, "rules/prompt-injection/x.yaml")
     assert [p["field"] for p in entry["patterns"]] == ["content", "user_input"]
+
+
+def test_pin_is_v4_3_1():
+    assert atr_catalog.ATR_PIN == "v4.3.1"
+
+
+# --- detection.condition (any / all) and status: deprecated -----------------
+
+def _rule(conditions, condition=None, status=None, rule_id="ATR-2026-99950"):
+    raw = {"id": rule_id, "title": "T", "severity": "high",
+           "detection": {"conditions": conditions}}
+    if condition is not None:
+        raw["detection"]["condition"] = condition
+    if status is not None:
+        raw["status"] = status
+    return raw
+
+
+def _cond(field, value):
+    return {"field": field, "operator": "regex", "value": value}
+
+
+def test_condition_defaults_to_any():
+    entry = atr_catalog._build_rule_entry(
+        _rule([_cond("content", "a")]), "rules/prompt-injection/x.yaml")
+    assert entry["condition"] == "any"
+
+
+def test_condition_all_is_recorded_when_every_condition_is_scannable():
+    entry, reason = atr_catalog._compile_rule(
+        _rule([_cond("content", "a"), _cond("user_input", "b")], condition="all"),
+        "rules/prompt-injection/x.yaml")
+    assert reason == ""
+    assert entry["condition"] == "all"
+    assert len(entry["patterns"]) == 2
+
+
+@pytest.mark.parametrize("bad", [
+    _cond("tool_response", "b"),                                   # runtime-only field
+    {"field": "content", "operator": "contains", "value": "b"},    # not a regex
+    _cond("content", "(?P<unclosed"),                              # malformed regex
+    _cond("content", ""),                                          # empty value
+])
+def test_condition_all_with_an_unevaluable_condition_drops_the_rule(bad):
+    """Dropping just that condition would turn `A AND B` into `A` and
+    over-fire, so the whole rule is skipped and the reason is reported."""
+    entry, reason = atr_catalog._compile_rule(
+        _rule([_cond("content", "a"), bad], condition="all"),
+        "rules/prompt-injection/x.yaml")
+    assert entry is None
+    assert reason == atr_catalog._SKIP_ALL_UNSCANNABLE
+
+
+def test_condition_any_with_an_unevaluable_condition_keeps_the_rest():
+    entry = atr_catalog._build_rule_entry(
+        _rule([_cond("content", "a"), _cond("tool_response", "b")], condition="any"),
+        "rules/prompt-injection/x.yaml")
+    assert [p["pattern"] for p in entry["patterns"]] == ["a"]
+
+
+def test_unsupported_condition_expression_drops_the_rule():
+    entry, reason = atr_catalog._compile_rule(
+        _rule([_cond("content", "a")], condition="a and not b"),
+        "rules/prompt-injection/x.yaml")
+    assert entry is None
+    assert reason == atr_catalog._SKIP_BAD_CONDITION
+
+
+def test_deprecated_rules_are_skipped_but_other_statuses_compile():
+    entry, reason = atr_catalog._compile_rule(
+        _rule([_cond("content", "a")], status="deprecated"),
+        "rules/prompt-injection/x.yaml")
+    assert entry is None
+    assert reason == atr_catalog._SKIP_DEPRECATED
+    for status in ("experimental", "stable", "draft"):
+        assert atr_catalog._build_rule_entry(
+            _rule([_cond("content", "a")], status=status),
+            "rules/prompt-injection/x.yaml") is not None
+
+
+def test_parse_rules_dir_reports_skip_reasons(tmp_path):
+    d = tmp_path / "rules" / "prompt-injection"
+    d.mkdir(parents=True)
+
+    def write(name, raw):
+        import yaml
+        (d / name).write_text(yaml.safe_dump(raw))
+
+    write("ok.yaml", _rule([_cond("content", "a")], rule_id="OK"))
+    write("dep.yaml", _rule([_cond("content", "a")], status="deprecated", rule_id="D"))
+    write("all.yaml", _rule([_cond("content", "a"), _cond("tool_args", "b")],
+                            condition="all", rule_id="A"))
+    write("none.yaml", _rule([_cond("tool_args", "b")], rule_id="N"))
+    catalog = atr_catalog._parse_rules_dir(str(tmp_path / "rules"))
+    assert catalog["total_rules"] == 4
+    assert catalog["compiled_rules"] == 1
+    assert catalog["skipped_by_reason"] == {
+        atr_catalog._SKIP_DEPRECATED: 1,
+        atr_catalog._SKIP_ALL_UNSCANNABLE: 1,
+        atr_catalog._SKIP_NO_REGEX: 1,
+    }
+
+
+def _match_rule(tmp_path, monkeypatch, condition, content):
+    catalog_root = _isolate_catalog_dir(tmp_path, monkeypatch)
+    _write_catalog(catalog_root, rules=[{
+        "id": "ATR-2026-99951", "title": "T", "severity": "high",
+        "maturity": "stable", "category": "prompt-injection",
+        **({"condition": condition} if condition else {}),
+        "patterns": [
+            {"field": "content", "pattern": "alpha", "description": "first"},
+            {"field": "user_input", "pattern": "beta", "description": "second"},
+        ],
+        "references": {"owasp_agentic": [], "mitre_atlas": [], "owasp_llm": [], "cve": []},
+    }])
+    return atr_catalog.match_content(content)["findings"]
+
+
+def test_match_any_fires_on_a_single_hit(tmp_path, monkeypatch):
+    assert len(_match_rule(tmp_path, monkeypatch, "any", "only beta here")) == 1
+
+
+def test_match_legacy_catalog_without_condition_key_is_any(tmp_path, monkeypatch):
+    assert len(_match_rule(tmp_path, monkeypatch, None, "only beta here")) == 1
+
+
+def test_match_all_fires_when_every_pattern_hits(tmp_path, monkeypatch):
+    findings = _match_rule(tmp_path, monkeypatch, "all", "beta and alpha")
+    assert len(findings) == 1
+    # Reported against the first pattern of the rule.
+    assert findings[0]["provenance"]["matched_field"] == "content"
+
+
+def test_match_all_does_not_fire_on_a_partial_hit(tmp_path, monkeypatch):
+    assert _match_rule(tmp_path, monkeypatch, "all", "only alpha here") == []
+    assert _match_rule(tmp_path, monkeypatch, "all", "only beta here") == []
+
+
+def test_match_all_does_not_fire_when_a_pattern_failed_to_compile(tmp_path, monkeypatch):
+    catalog_root = _isolate_catalog_dir(tmp_path, monkeypatch)
+    _write_catalog(catalog_root, rules=[{
+        "id": "R", "title": "T", "severity": "high", "maturity": "stable",
+        "category": "prompt-injection", "condition": "all",
+        "patterns": [{"field": "content", "pattern": "alpha", "description": ""},
+                     {"field": "content", "pattern": "(?P<unclosed", "description": ""}],
+        "references": {"owasp_agentic": [], "mitre_atlas": [], "owasp_llm": [], "cve": []},
+    }])
+    assert atr_catalog.match_content("alpha")["findings"] == []
+
+
+# --- License hint -----------------------------------------------------------
+
+def test_license_hint_is_a_sha256():
+    assert len(atr_catalog._ATR_LICENSE_SHA256_HINT) == 64
+    int(atr_catalog._ATR_LICENSE_SHA256_HINT, 16)
+
+
+def _run_update_with_license(tmp_path, monkeypatch, license_text):
+    _isolate_catalog_dir(tmp_path, monkeypatch)
+    tarball_path = _build_fixture_tarball(tmp_path, {
+        "prompt-injection/ATR-2026-99001.yaml": _sample_rule_yaml(),
+    })
+    with open(tarball_path, "rb") as fh:
+        tarball_bytes = fh.read()
+    url_to_bytes = {
+        atr_catalog.ATR_SOURCE_URL: tarball_bytes,
+        atr_catalog.ATR_LICENSE_PROBE_URL: license_text.encode("utf-8"),
+    }
+    with patch.object(atr_catalog.urllib.request, "urlopen", _FakeUrlopen(url_to_bytes)):
+        return atr_catalog.update_catalog()
+
+
+def test_update_flags_a_license_whose_hash_changed_but_does_not_refuse(tmp_path, monkeypatch):
+    result = _run_update_with_license(
+        tmp_path, monkeypatch, "MIT License\n\nCopyright (c) 2026 Somebody Else\n")
+    assert result["ok"] is True
+    assert result["license_changed"] is True
+    assert "license_review" in result
+    with open(atr_catalog.META_PATH) as f:
+        assert json.load(f)["license_changed"] is True
+
+
+def test_update_does_not_flag_the_reviewed_license(tmp_path, monkeypatch):
+    # Pretend the reviewed hash is the hash of this text.
+    text = "MIT License\n\nCopyright (c) 2026 ATR Contributors\n"
+    import hashlib
+    monkeypatch.setattr(atr_catalog, "_ATR_LICENSE_SHA256_HINT",
+                        hashlib.sha256(text.encode("utf-8")).hexdigest())
+    result = _run_update_with_license(tmp_path, monkeypatch, text)
+    assert result["ok"] is True
+    assert result["license_changed"] is False
+    assert "license_review" not in result
+
+
+def test_update_still_refuses_non_mit_even_if_hash_matches(tmp_path, monkeypatch):
+    text = "Apache License 2.0\n"
+    import hashlib
+    monkeypatch.setattr(atr_catalog, "_ATR_LICENSE_SHA256_HINT",
+                        hashlib.sha256(text.encode("utf-8")).hexdigest())
+    result = _run_update_with_license(tmp_path, monkeypatch, text)
+    assert "error" in result
+
+
+# --- Tarball limits ---------------------------------------------------------
+
+def test_tarball_cap_fits_the_measured_v4_tarball():
+    # v4.3.1 measured at 59,013,052 bytes; the cap must leave real headroom.
+    assert atr_catalog._TARBALL_MAX_BYTES >= 2 * 59_013_052 - 1024 * 1024
+
+
+def test_extract_rejects_sibling_directory_sharing_the_rules_prefix(tmp_path):
+    """`rules/../rules_evil/x.yaml` resolves next to rules/, and a bare
+    startswith("…/rules") check would let it through."""
+    buf = io.BytesIO()
+    body = b"title: t\nid: X\n"
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        lic = b"MIT License\n"
+        i = tarfile.TarInfo("root/LICENSE")
+        i.size = len(lic)
+        tf.addfile(i, io.BytesIO(lic))
+        i = tarfile.TarInfo("root/rules/../rules_evil/x.yaml")
+        i.size = len(body)
+        tf.addfile(i, io.BytesIO(body))
+    tarball = tmp_path / "t.tar.gz"
+    tarball.write_bytes(buf.getvalue())
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(atr_catalog._AtrFetchError, match="escapes"):
+        atr_catalog._safe_extract_rules(str(tarball), str(dest))
+    assert not (dest / "rules_evil").exists()
 
 
 def test_finding_provenance_reports_which_field_matched(tmp_path, monkeypatch):

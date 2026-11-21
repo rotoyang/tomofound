@@ -1,0 +1,24 @@
+{
+  "name": "tomofound",
+  "version": "0.5.0",
+  "description": "Security scanner for AI tool plugins, skills, and connectors: secrets, backdoors, CVEs, prompt injection, and MCP tool poisoning, with a 0-100 risk score.",
+  "author": {
+    "name": "rotoyang"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/rotoyang/tomofound",
+  "network": {
+    "hosts": [
+      "github.com",
+      "api.github.com",
+      "raw.githubusercontent.com",
+      "codeload.github.com",
+      "release-assets.githubusercontent.com",
+      "api.osv.dev",
+      "pypi.org",
+      "files.pythonhosted.org",
+      "mirror.gcr.io",
+      "ghcr.io"
+    ]
+  }
+}
